@@ -342,6 +342,7 @@ function buildInventoryReportPayload(freq, stockItems, stockMovements) {
 
 function buildShipmentReportPayload(freq, shipments, settings) {
   const thresholdDays = (settings && settings.shipment_threshold_days) || 3;
+  const custom = (settings && settings.origin_custom) || {};
   const { from, to, label } = getPeriodRange(freq);
   const dk = dayKeys();
   const labelOf = (d) => (freq === "daily" ? dayLabelFor(d, dk) : fmtDate(d));
@@ -349,10 +350,10 @@ function buildShipmentReportPayload(freq, shipments, settings) {
   const released = shipments.filter((s) => s.status === "DISPATCHED" && s.date_out && s.date_out >= from && s.date_out <= to);
   const remaining = shipments.filter((s) => s.status === "IN_WAREHOUSE").sort((a, b) => (a.date_in + a.time_in).localeCompare(b.date_in + b.time_in));
   const overdueCount = remaining.filter((s) => shipmentState(s, thresholdDays) === "OVERDUE").length;
-  const tally = (list, getDate) => {
+  const tally = (list, getKey, fmt) => {
     const m = new Map();
-    list.forEach((s) => { const d = getDate(s); m.set(d, (m.get(d) || 0) + 1); });
-    return [...m.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([d, n]) => `- ${labelOf(d)}: ${n}`);
+    list.forEach((s) => { const k = getKey(s) || "—"; m.set(k, (m.get(k) || 0) + 1); });
+    return [...m.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([k, n]) => `- ${fmt ? fmt(k) : k}: ${n}`);
   };
   const freqLabel = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" }[freq] || "Shipment";
 
@@ -360,14 +361,18 @@ function buildShipmentReportPayload(freq, shipments, settings) {
     `${freqLabel} Shipment Report`, `Period: ${label}`, "",
     `Received: ${received.length}`, `Released: ${released.length}`,
     `Still in warehouse: ${remaining.length}${overdueCount ? ` (${overdueCount} overdue, limit ${thresholdDays} day${thresholdDays === 1 ? "" : "s"})` : ""}`, "",
-    released.length ? "Released in this period — by day they arrived:" : "",
-    ...tally(released, (s) => s.date_in),
+    received.length ? "Received by origin:" : "",
+    ...(received.length ? tally(received, (s) => (s.origin || "").toUpperCase(), (k) => originLabel(k, custom)) : []),
+    released.length ? "" : "", released.length ? "Released — by day they arrived:" : "",
+    ...(released.length ? tally(released, (s) => s.date_in, (k) => labelOf(k)).sort().reverse() : []),
+    released.length ? "Released — where to:" : "",
+    ...(released.length ? tally(released, (s) => s.destination) : []),
     remaining.length ? "" : "", remaining.length ? "Still in warehouse — by day they arrived:" : "",
-    ...tally(remaining, (s) => s.date_in),
+    ...(remaining.length ? tally(remaining, (s) => s.date_in, (k) => labelOf(k)) : []),
     remaining.length ? "" : "", remaining.length ? "Still here (oldest first):" : "",
     ...remaining.slice(0, 12).map((s) => {
       const note = (s.hold_notes || []).slice(-1)[0];
-      return `- ${s.awb}${s.arrival_no ? ` (arr ${s.arrival_no})` : ""} — arrived ${labelOf(s.date_in)} ${fmtTime(s.time_in)}, held ${fmtAgeMs(shipmentAgeMs(s))}${shipmentState(s, thresholdDays) === "OVERDUE" ? " [OVERDUE]" : ""}${note ? ` — Reason: ${note.text}` : ""}`;
+      return `- ${shipRef(s)}${s.origin ? ` from ${String(s.origin).toUpperCase()}` : ""} — arrived ${labelOf(s.date_in)} ${fmtTime(s.time_in)}, held ${fmtAgeMs(shipmentAgeMs(s))}${shipmentState(s, thresholdDays) === "OVERDUE" ? " [OVERDUE]" : ""}${note ? ` — Reason: ${note.text}` : ""}`;
     }),
     remaining.length > 12 ? `…and ${remaining.length - 12} more — full list in the attached CSV.` : "",
     "", "Sent from the Aramex Gatehouse Register app.",
@@ -377,13 +382,13 @@ function buildShipmentReportPayload(freq, shipments, settings) {
   [...received, ...released, ...remaining].forEach((s) => rowMap.set(s.id, s));
   const rows = [...rowMap.values()].sort((a, b) => (b.date_in + b.time_in).localeCompare(a.date_in + a.time_in));
   const csvHeaders = [
-    { label: "AWB", get: (r) => r.awb }, { label: "Arrival No.", get: (r) => r.arrival_no || "" }, { label: "Status", get: (r) => r.status },
+    { label: "Arrival No.", get: (r) => r.arrival_no || "" }, { label: "AWB", get: (r) => r.awb || "" }, { label: "Status", get: (r) => r.status },
+    { label: "Origin Code", get: (r) => r.origin || "" }, { label: "Origin", get: (r) => originName(r.origin, custom) },
     { label: "Arrived Date", get: (r) => r.date_in }, { label: "Arrived Day", get: (r) => dayLabelFor(r.date_in, dk) }, { label: "Time In", get: (r) => r.time_in },
-    { label: "Brought By", get: (r) => r.brought_by_name }, { label: "Brought By Company", get: (r) => r.brought_by_company }, { label: "Brought By Phone", get: (r) => r.brought_by_phone },
-    { label: "Received By (Guard)", get: (r) => r.received_by },
+    { label: "Brought By", get: (r) => r.brought_by_name }, { label: "Brought By ID", get: (r) => r.brought_by_id || "" },
     { label: "Date Out", get: (r) => r.date_out || "" }, { label: "Time Out", get: (r) => r.time_out || "" },
-    { label: "Taken By", get: (r) => r.taken_by_name }, { label: "Taken By Company", get: (r) => r.taken_by_company }, { label: "Taken By Phone", get: (r) => r.taken_by_phone },
-    { label: "Released By (Guard)", get: (r) => r.released_by || "" },
+    { label: "Destination", get: (r) => r.destination || "" },
+    { label: "Taken By (Staff)", get: (r) => r.taken_by_name }, { label: "Staff Number", get: (r) => r.taken_by_id || "" },
     { label: "Days in Warehouse", get: (r) => {
       const end = r.status === "DISPATCHED" ? new Date(`${r.date_out}T${r.time_out}`).getTime() : Date.now();
       return (Math.max(0, end - new Date(`${r.date_in}T${r.time_in}`).getTime()) / 86400000).toFixed(1);
@@ -492,14 +497,21 @@ async function buildAccounts() {
   const adminpw = await sha256("manager123");
   const guardPw = await sha256("guard123");
   return [
-    { id: "u_admin", name: "Hasrat Murshad Raza", username: "hasrat", passwordHash: adminpw, role: "admin", active: true, created_at: Date.now() },
-    { id: "u_109_g1", name: "Arslan Ahmed", username: "arslan109", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
-    { id: "u_109_g2", name: "Amir Hamja", username: "amir109", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
-    { id: "u_102_g1", name: "Guard 1 (Chamber 102)", username: "guard1_102", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
-    { id: "u_102_g2", name: "Guard 2 (Chamber 102)", username: "guard2_102", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
-    { id: "u_101_g1", name: "Guard 1 (Chamber 101)", username: "guard1_101", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
-    { id: "u_101_g2", name: "Guard 2 (Chamber 101)", username: "guard2_101", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
+    { id: "u_admin", group: "Management", name: "Hasrat Murshad Raza", username: "hasrat", passwordHash: adminpw, role: "admin", active: true, created_at: Date.now() },
+    { id: "u_109_g1", group: "Chamber 109", name: "Arslan Ahmed", username: "arslan109", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
+    { id: "u_109_g2", group: "Chamber 109", name: "Amir Hamja", username: "amir109", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
+    { id: "u_102_g1", group: "Chamber 102", name: "Guard 1 (Chamber 102)", username: "guard1_102", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
+    { id: "u_102_g2", group: "Chamber 102", name: "Guard 2 (Chamber 102)", username: "guard2_102", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
+    { id: "u_101_g1", group: "Chamber 101", name: "Guard 1 (Chamber 101)", username: "guard1_101", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
+    { id: "u_101_g2", group: "Chamber 101", name: "Guard 2 (Chamber 101)", username: "guard2_101", passwordHash: guardPw, role: "guard", active: true, created_at: Date.now() },
   ];
+}
+// Which login-page group an account appears under (older saves had no `group` field).
+function userGroup(u) {
+  if (u.group && u.group.trim()) return u.group.trim();
+  const m = /^u_(\d+)_g\d+$/.exec(u.id || "");
+  if (m) return `Chamber ${m[1]}`;
+  return u.role === "admin" ? "Management" : "Other guards";
 }
 function defaultChannel() {
   return { enabled: false, recipient_name: "", recipient_email: "", frequency: "daily", time: "18:00", last_sent: null };
@@ -511,6 +523,7 @@ function defaultSettings() {
     handover_alert: { recipient_name: "", recipient_email: "" },
     incident_alert: { recipient_name: "", recipient_email: "" },
     shipment_threshold_days: 3,
+    origin_custom: {},
   };
 }
 // Older saves had one shared `report_delivery` channel — carry it forward as the
@@ -529,6 +542,7 @@ function migrateSettings(raw) {
   if (!out.handover_alert) out = { ...out, handover_alert: { recipient_name: "", recipient_email: "" } };
   if (!out.incident_alert) out = { ...out, incident_alert: { recipient_name: "", recipient_email: "" } };
   if (!out.shipment_threshold_days) out = { ...out, shipment_threshold_days: 3 };
+  if (!out.origin_custom) out = { ...out, origin_custom: {} };
   if (out.report_channels && !out.report_channels.shipments) out = { ...out, report_channels: { ...out.report_channels, shipments: defaultChannel() } };
   return out;
 }
@@ -676,9 +690,9 @@ async function buildSampleData() {
   const d4 = todayStr(new Date(Date.now() - 4 * 86400000));
   const blankOut = { date_out: null, time_out: null, taken_by_name: "", taken_by_company: "", taken_by_phone: "", taken_by_id: "", released_by: null, remarks_out: "" };
   const shipments = [
-    { id: uid("sh_"), awb: "176-48201935", status: "IN_WAREHOUSE", date_in: d4, time_in: "10:20:00", brought_by_name: "Rashid Al Mazrouei", brought_by_company: "Gulf Freight Partners", brought_by_phone: "0551234567", brought_by_id: "", received_by: "Arslan Ahmed", remarks_in: "2 cartons", ...blankOut, created_at: Date.now(), updated_at: Date.now(), demo: true },
-    { id: uid("sh_"), awb: "176-48205567", status: "IN_WAREHOUSE", date_in: y, time_in: "15:40:00", brought_by_name: "Sara Haidari", brought_by_company: "City Customs Brokers", brought_by_phone: "0509876543", brought_by_id: "", received_by: "Amir Hamja", remarks_in: "", ...blankOut, created_at: Date.now(), updated_at: Date.now(), demo: true },
-    { id: uid("sh_"), awb: "157-30918822", status: "DISPATCHED", date_in: y, time_in: "09:05:00", brought_by_name: "Rashid Al Mazrouei", brought_by_company: "Gulf Freight Partners", brought_by_phone: "", brought_by_id: "", received_by: "Arslan Ahmed", remarks_in: "",
+    { id: uid("sh_"), arrival_no: "1042215", origin: "AUH", awb: "176-48201935", status: "IN_WAREHOUSE", date_in: d4, time_in: "10:20:00", brought_by_name: "Rashid Al Mazrouei", brought_by_company: "Gulf Freight Partners", brought_by_phone: "0551234567", brought_by_id: "", received_by: "Arslan Ahmed", remarks_in: "2 cartons", ...blankOut, created_at: Date.now(), updated_at: Date.now(), demo: true },
+    { id: uid("sh_"), arrival_no: "1042301", origin: "LON", awb: "176-48205567", status: "IN_WAREHOUSE", date_in: y, time_in: "15:40:00", brought_by_name: "Sara Haidari", brought_by_company: "City Customs Brokers", brought_by_phone: "0509876543", brought_by_id: "", received_by: "Amir Hamja", remarks_in: "", ...blankOut, created_at: Date.now(), updated_at: Date.now(), demo: true },
+    { id: uid("sh_"), arrival_no: "1042188", origin: "BOM", awb: "157-30918822", status: "DISPATCHED", date_in: y, time_in: "09:05:00", brought_by_name: "Rashid Al Mazrouei", brought_by_company: "Gulf Freight Partners", brought_by_phone: "", brought_by_id: "", received_by: "Arslan Ahmed", remarks_in: "",
       date_out: today, time_out: "08:30:00", taken_by_name: "Sara Haidari", taken_by_company: "City Customs Brokers", taken_by_phone: "0509876543", taken_by_id: "", released_by: "Amir Hamja", remarks_out: "", created_at: Date.now(), updated_at: Date.now(), demo: true },
   ];
 
@@ -1440,17 +1454,20 @@ function LoginScreen({ users, onLogin, notify, onResetAccounts }) {
   const alreadyConnected = !!getSavedFirebaseConfig();
   const [expandedChamber, setExpandedChamber] = useState(null);
 
-  const chambers = [
-    { id: "109", color: C.aramexRed, title: "Chamber 109", subtitle: "Arslan & Hamja", guards: [
-      { u: "arslan109", p: "guard123", label: "Arslan Ahmed" }, { u: "amir109", p: "guard123", label: "Amir Hamja" },
-    ] },
-    { id: "102", color: "#2563EB", title: "Chamber 102", subtitle: "Guard 1 & Guard 2", guards: [
-      { u: "guard1_102", p: "guard123", label: "Guard 1" }, { u: "guard2_102", p: "guard123", label: "Guard 2" },
-    ] },
-    { id: "101", color: "#10B981", title: "Chamber 101", subtitle: "Guard 1 & Guard 2", guards: [
-      { u: "guard1_101", p: "guard123", label: "Guard 1" }, { u: "guard2_101", p: "guard123", label: "Guard 2" },
-    ] },
-  ];
+  const passwordRef = useRef(null);
+  const accountGroups = useMemo(() => {
+    const colors = [C.aramexRed, "#2563EB", "#10B981", "#7C3AED", "#F59E0B", "#0D9488"];
+    const map = new Map();
+    (users || []).filter((u) => u.active).forEach((u) => {
+      const g = userGroup(u);
+      if (!map.has(g)) map.set(g, []);
+      map.get(g).push(u);
+    });
+    const names = [...map.keys()].sort((x, y) => (x === "Management" ? -1 : y === "Management" ? 1 : x.localeCompare(y, undefined, { numeric: true })));
+    return names.map((g, i) => ({ id: g, title: g, color: g === "Management" ? C.slate : colors[i % colors.length], members: map.get(g) }));
+  }, [users]);
+  const shortName = (n) => { const t = String(n || "").replace(/\s*\(.*\)\s*$/, "").trim(); return /^guard\s*\d/i.test(t) ? t : t.split(" ")[0]; };
+  const pickAccount = (u) => { setUsername(u.username); setPassword(""); setError(""); setTimeout(() => { if (passwordRef.current) passwordRef.current.focus(); }, 60); };
 
   const doLogin = async (u, p) => {
     setError("");
@@ -1514,7 +1531,7 @@ function LoginScreen({ users, onLogin, notify, onResetAccounts }) {
               <div style={{ border: `1px solid ${C.line}`, borderRadius: 9, padding: "8px 38px 8px 36px", position: "relative" }}>
                 <div style={{ fontSize: 11, color: C.ink50, marginBottom: 1 }}>Password</div>
                 <input style={{ border: "none", outline: "none", width: "100%", fontSize: 14.5, fontFamily: FONT_SANS, padding: 0, background: "transparent" }}
-                  type={show ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoCapitalize="none" autoCorrect="off" />
+                  ref={passwordRef} type={show ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoCapitalize="none" autoCorrect="off" />
                 <button type="button" onClick={() => setShow((s) => !s)} style={{ position: "absolute", right: 10, top: 20, background: "none", border: "none", color: C.ink50, cursor: "pointer" }}>
                   {show ? <EyeOff size={17} /> : <Eye size={17} />}
                 </button>
@@ -1529,46 +1546,41 @@ function LoginScreen({ users, onLogin, notify, onResetAccounts }) {
           </form>
 
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${C.line}` }}>
-            <div style={{ textAlign: "center", fontSize: 11.5, color: C.ink50, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>DEMO ACCOUNTS</div>
-            <div style={{ border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
-              {chambers.map((c, idx) => (
-                <div key={c.id} style={{ borderTop: idx > 0 ? `1px solid ${C.line}` : "none" }}>
-                  <button type="button" onClick={() => setExpandedChamber(expandedChamber === c.id ? null : c.id)} style={{
-                    width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", background: "#fff", border: "none", cursor: "pointer", textAlign: "left",
-                  }}>
-                    <GuardShieldIcon color={c.color} size={28} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 14.5, fontWeight: 700, color: C.ink }}>{c.title}</div>
-                      <div style={{ fontSize: 12, color: C.ink50 }}>{c.subtitle}</div>
-                    </div>
-                    <ChevronRight size={16} color={C.ink50} style={{ transform: expandedChamber === c.id ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
-                  </button>
-                  {expandedChamber === c.id && (
-                    <div style={{ padding: "0 12px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
-                      {c.guards.map((g) => (
-                        <button key={g.u} type="button" onClick={() => { setUsername(g.u); setPassword(g.p); doLogin(g.u, g.p); }} style={{
-                          display: "flex", justifyContent: "space-between", alignItems: "center", background: C.paperDim, border: "none",
-                          borderRadius: 7, padding: "8px 10px", cursor: "pointer", textAlign: "left",
-                        }}>
-                          <span style={{ fontSize: 13, color: C.ink }}>{g.label}</span>
-                          <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.ink50 }}>{g.u}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <button type="button" onClick={() => { setUsername("hasrat"); setPassword("manager123"); doLogin("hasrat", "manager123"); }} style={{
-              width: "100%", marginTop: 8, display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: "#fff",
-              border: `1px solid ${C.line}`, borderRadius: 10, cursor: "pointer", textAlign: "left",
-            }}>
-              <GuardShieldIcon color={C.navy} size={24} />
-              <div>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: C.ink }}>Manager</div>
-                <div style={{ fontSize: 11.5, color: C.ink50 }}>Hasrat Murshad Raza</div>
+            <div style={{ textAlign: "center", fontSize: 11.5, color: C.ink50, fontWeight: 700, letterSpacing: 1, marginBottom: 10 }}>SELECT YOUR ACCOUNT</div>
+            {accountGroups.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: C.ink50, textAlign: "center", padding: 10 }}>No active accounts — use "Reset login accounts" below.</div>
+            ) : (
+              <div style={{ border: `1px solid ${C.line}`, borderRadius: 10, overflow: "hidden" }}>
+                {accountGroups.map((c, idx) => (
+                  <div key={c.id} style={{ borderTop: idx > 0 ? `1px solid ${C.line}` : "none" }}>
+                    <button type="button" onClick={() => setExpandedChamber(expandedChamber === c.id ? null : c.id)} style={{
+                      width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "11px 12px", background: "#fff", border: "none", cursor: "pointer", textAlign: "left",
+                    }}>
+                      <GuardShieldIcon color={c.color} size={28} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14.5, fontWeight: 700, color: C.ink }}>{c.title}</div>
+                        <div style={{ fontSize: 12, color: C.ink50 }}>{c.members.map((m) => shortName(m.name)).join(" & ")}</div>
+                      </div>
+                      <ChevronRight size={16} color={C.ink50} style={{ transform: expandedChamber === c.id ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }} />
+                    </button>
+                    {expandedChamber === c.id && (
+                      <div style={{ padding: "0 12px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                        {c.members.map((m) => (
+                          <button key={m.id} type="button" onClick={() => pickAccount(m)} style={{
+                            display: "flex", justifyContent: "space-between", alignItems: "center", background: username.trim().toLowerCase() === m.username.toLowerCase() ? "#DBEAFE" : C.paperDim, border: "none",
+                            borderRadius: 7, padding: "8px 10px", cursor: "pointer", textAlign: "left", gap: 8,
+                          }}>
+                            <span style={{ fontSize: 13, color: C.ink }}>{m.name}</span>
+                            <span style={{ fontFamily: FONT_MONO, fontSize: 11, color: C.ink50 }}>{m.username}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
-            </button>
+            )}
+            <div style={{ fontSize: 11.5, color: C.ink50, textAlign: "center", marginTop: 8 }}>Tap your name to fill in the username, then type your password.</div>
           </div>
 
           <div style={{ marginTop: 18, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
@@ -1720,7 +1732,7 @@ function Dashboard({ session, employees, attendance, settings, empById, today, g
             <Truck size={18} color={C.redDeep} />
             <div>
               <div style={{ fontWeight: 700, fontSize: 13.5, color: C.redDeep }}>{overdueShipments.length} shipment(s) held longer than {shipThreshold} day(s)</div>
-              <div style={{ fontSize: 12, color: C.ink50 }}>{overdueShipments.slice(0, 5).map((x) => x.awb).join(", ")}{overdueShipments.length > 5 ? "…" : ""}</div>
+              <div style={{ fontSize: 12, color: C.ink50 }}>{overdueShipments.slice(0, 5).map((x) => shipRef(x)).join(", ")}{overdueShipments.length > 5 ? "…" : ""}</div>
             </div>
           </div>
           <Btn size="sm" tone="red" onClick={() => goto("shipments")}>View Shipments</Btn>
@@ -3341,10 +3353,27 @@ function IncidentAlertSettings({ settings, persistSettings, notify, onClose }) {
 
 /* ---------------------------------------------------------------------
    SHIPMENTS (warehouse)
-   Every shipment is logged in by AWB with who brought it, and logged out
-   with who collected it. Anything sitting in the warehouse longer than the
-   threshold (default 3 days) is flagged OVERDUE so it can't be forgotten.
+   Logged in by arrival number (+ origin and who brought it with their ID),
+   logged out with the staff member who took it (name + staff number) and
+   where it's going. Anything sitting longer than the threshold is flagged.
+   Tracking starts from the day it's first used — nothing older is needed.
 --------------------------------------------------------------------- */
+const ORIGIN_TABLE = "AUH:Abu Dhabi, UAE|DXB:Dubai, UAE|DWC:Dubai (Al Maktoum), UAE|SHJ:Sharjah, UAE|RKT:Ras Al Khaimah, UAE|AAN:Al Ain, UAE|FJR:Fujairah, UAE|DOH:Doha, Qatar|BAH:Bahrain|KWI:Kuwait|MCT:Muscat, Oman|SLL:Salalah, Oman|RUH:Riyadh, Saudi Arabia|JED:Jeddah, Saudi Arabia|DMM:Dammam, Saudi Arabia|MED:Madinah, Saudi Arabia|AMM:Amman, Jordan|AQJ:Aqaba, Jordan|BEY:Beirut, Lebanon|DAM:Damascus, Syria|BGW:Baghdad, Iraq|EBL:Erbil, Iraq|BSR:Basra, Iraq|NJF:Najaf, Iraq|IKA:Tehran, Iran|THR:Tehran, Iran|SYZ:Shiraz, Iran|TLV:Tel Aviv, Israel|SAH:Sanaa, Yemen|ADE:Aden, Yemen|CAI:Cairo, Egypt|ALY:Alexandria, Egypt|HRG:Hurghada, Egypt|SSH:Sharm El Sheikh, Egypt|KRT:Khartoum, Sudan|ADD:Addis Ababa, Ethiopia|JIB:Djibouti|MGQ:Mogadishu, Somalia|NBO:Nairobi, Kenya|MBA:Mombasa, Kenya|DAR:Dar es Salaam, Tanzania|ZNZ:Zanzibar, Tanzania|EBB:Entebbe, Uganda|KGL:Kigali, Rwanda|LOS:Lagos, Nigeria|ABV:Abuja, Nigeria|ACC:Accra, Ghana|DKR:Dakar, Senegal|ABJ:Abidjan, Ivory Coast|CMN:Casablanca, Morocco|RAK:Marrakech, Morocco|ALG:Algiers, Algeria|TUN:Tunis, Tunisia|TIP:Tripoli, Libya|JNB:Johannesburg, South Africa|CPT:Cape Town, South Africa|DUR:Durban, South Africa|LUN:Lusaka, Zambia|HRE:Harare, Zimbabwe|MPM:Maputo, Mozambique|WDH:Windhoek, Namibia|GBE:Gaborone, Botswana|MRU:Mauritius|SEZ:Seychelles|TNR:Antananarivo, Madagascar|LAD:Luanda, Angola|FIH:Kinshasa, DR Congo|DLA:Douala, Cameroon|BOM:Mumbai, India|DEL:Delhi, India|BLR:Bengaluru, India|MAA:Chennai, India|HYD:Hyderabad, India|CCU:Kolkata, India|COK:Kochi, India|TRV:Thiruvananthapuram, India|CCJ:Kozhikode, India|CJB:Coimbatore, India|AMD:Ahmedabad, India|GOI:Goa, India|PNQ:Pune, India|JAI:Jaipur, India|LKO:Lucknow, India|IXE:Mangaluru, India|KHI:Karachi, Pakistan|LHE:Lahore, Pakistan|ISB:Islamabad, Pakistan|PEW:Peshawar, Pakistan|MUX:Multan, Pakistan|SKT:Sialkot, Pakistan|DAC:Dhaka, Bangladesh|CGP:Chattogram, Bangladesh|CMB:Colombo, Sri Lanka|KTM:Kathmandu, Nepal|KBL:Kabul, Afghanistan|MLE:Male, Maldives|TAS:Tashkent, Uzbekistan|ALA:Almaty, Kazakhstan|NQZ:Astana, Kazakhstan|GYD:Baku, Azerbaijan|TBS:Tbilisi, Georgia|EVN:Yerevan, Armenia|FRU:Bishkek, Kyrgyzstan|BKK:Bangkok, Thailand|DMK:Bangkok (Don Mueang), Thailand|HKT:Phuket, Thailand|SIN:Singapore|KUL:Kuala Lumpur, Malaysia|PEN:Penang, Malaysia|CGK:Jakarta, Indonesia|SUB:Surabaya, Indonesia|DPS:Bali, Indonesia|MNL:Manila, Philippines|CEB:Cebu, Philippines|SGN:Ho Chi Minh City, Vietnam|HAN:Hanoi, Vietnam|PNH:Phnom Penh, Cambodia|RGN:Yangon, Myanmar|VTE:Vientiane, Laos|HKG:Hong Kong|MFM:Macau|CAN:Guangzhou, China|SZX:Shenzhen, China|SHA:Shanghai, China|PVG:Shanghai, China|PEK:Beijing, China|PKX:Beijing, China|CTU:Chengdu, China|CKG:Chongqing, China|WUH:Wuhan, China|XIY:Xi'an, China|TPE:Taipei, Taiwan|ICN:Seoul, South Korea|SEL:Seoul, South Korea|GMP:Seoul (Gimpo), South Korea|PUS:Busan, South Korea|NRT:Tokyo, Japan|HND:Tokyo, Japan|TYO:Tokyo, Japan|KIX:Osaka, Japan|OSA:Osaka, Japan|NGO:Nagoya, Japan|FUK:Fukuoka, Japan|ULN:Ulaanbaatar, Mongolia|LON:London, UK|LHR:London Heathrow, UK|LGW:London Gatwick, UK|STN:London Stansted, UK|LTN:London Luton, UK|MAN:Manchester, UK|BHX:Birmingham, UK|EDI:Edinburgh, UK|GLA:Glasgow, UK|DUB:Dublin, Ireland|PAR:Paris, France|CDG:Paris, France|ORY:Paris Orly, France|AMS:Amsterdam, Netherlands|BRU:Brussels, Belgium|LGG:Liege, Belgium|LUX:Luxembourg|FRA:Frankfurt, Germany|MUC:Munich, Germany|BER:Berlin, Germany|DUS:Dusseldorf, Germany|HAM:Hamburg, Germany|CGN:Cologne, Germany|LEJ:Leipzig, Germany|STR:Stuttgart, Germany|ZRH:Zurich, Switzerland|GVA:Geneva, Switzerland|VIE:Vienna, Austria|MAD:Madrid, Spain|BCN:Barcelona, Spain|LIS:Lisbon, Portugal|OPO:Porto, Portugal|ROM:Rome, Italy|FCO:Rome, Italy|MIL:Milan, Italy|MXP:Milan, Italy|VCE:Venice, Italy|NAP:Naples, Italy|ATH:Athens, Greece|IST:Istanbul, Turkey|SAW:Istanbul (Sabiha), Turkey|ESB:Ankara, Turkey|ADB:Izmir, Turkey|CPH:Copenhagen, Denmark|OSL:Oslo, Norway|STO:Stockholm, Sweden|ARN:Stockholm, Sweden|GOT:Gothenburg, Sweden|HEL:Helsinki, Finland|WAW:Warsaw, Poland|PRG:Prague, Czechia|BUD:Budapest, Hungary|OTP:Bucharest, Romania|SOF:Sofia, Bulgaria|BEG:Belgrade, Serbia|ZAG:Zagreb, Croatia|MOW:Moscow, Russia|SVO:Moscow, Russia|DME:Moscow, Russia|LED:St Petersburg, Russia|KBP:Kyiv, Ukraine|MLA:Malta|LCA:Larnaca, Cyprus|RIX:Riga, Latvia|TLL:Tallinn, Estonia|VNO:Vilnius, Lithuania|BTS:Bratislava, Slovakia|LJU:Ljubljana, Slovenia|SJJ:Sarajevo, Bosnia|TIA:Tirana, Albania|SKP:Skopje, North Macedonia|RKV:Reykjavik, Iceland|NYC:New York, USA|JFK:New York, USA|EWR:Newark, USA|LAX:Los Angeles, USA|SFO:San Francisco, USA|ORD:Chicago, USA|CHI:Chicago, USA|ATL:Atlanta, USA|MIA:Miami, USA|IAH:Houston, USA|DFW:Dallas, USA|BOS:Boston, USA|IAD:Washington DC, USA|WAS:Washington DC, USA|SEA:Seattle, USA|DTW:Detroit, USA|PHL:Philadelphia, USA|CVG:Cincinnati, USA|MEM:Memphis, USA|SDF:Louisville, USA|ANC:Anchorage, USA|YYZ:Toronto, Canada|YUL:Montreal, Canada|YVR:Vancouver, Canada|MEX:Mexico City, Mexico|GRU:Sao Paulo, Brazil|SAO:Sao Paulo, Brazil|GIG:Rio de Janeiro, Brazil|EZE:Buenos Aires, Argentina|BOG:Bogota, Colombia|LIM:Lima, Peru|SCL:Santiago, Chile|PTY:Panama City, Panama|SJO:San Jose, Costa Rica|UIO:Quito, Ecuador|SYD:Sydney, Australia|MEL:Melbourne, Australia|BNE:Brisbane, Australia|PER:Perth, Australia|AKL:Auckland, New Zealand";
+const ORIGIN_NAMES = Object.fromEntries(ORIGIN_TABLE.split("|").map((x) => { const i = x.indexOf(":"); return [x.slice(0, i), x.slice(i + 1)]; }));
+function originName(code, custom) {
+  const c = String(code || "").trim().toUpperCase();
+  if (!c) return "";
+  return (custom && custom[c]) || ORIGIN_NAMES[c] || "";
+}
+function originLabel(code, custom) {
+  const c = String(code || "").trim().toUpperCase();
+  if (!c) return "";
+  const n = originName(c, custom);
+  return n ? `${c} — ${n}` : c;
+}
+function shipRef(s) { return (s.arrival_no || s.awb || "—"); }
+function shipKey(s) { return String(s.arrival_no || s.awb || "").trim().toUpperCase(); }
+
 function shipmentAgeMs(s) {
   return Date.now() - new Date(`${s.date_in}T${s.time_in}`).getTime();
 }
@@ -3363,31 +3392,6 @@ function fmtAgeMs(ms) {
   if (h > 0) return `${h}h ${m}m`;
   return `${m}m`;
 }
-
-function BackdateDateTime({ active, setActive, date, setDate, time, setTime, error, setError, label }) {
-  if (!active) {
-    return (
-      <button type="button" onClick={() => { setActive(true); setError(""); }} style={{
-        background: "none", border: "none", color: C.navy, fontSize: 12.5, fontWeight: 600,
-        cursor: "pointer", textDecoration: "underline", padding: 0, marginBottom: 14, display: "block",
-      }}>{label}</button>
-    );
-  }
-  return (
-    <div style={{ background: "#FCEFE0", border: `1px solid #F2D6A6`, borderRadius: 9, padding: "12px 14px", marginBottom: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: C.amberDeep, letterSpacing: 0.3 }}>ACTUAL DATE &amp; TIME</span>
-        <button type="button" onClick={() => { setActive(false); setError(""); }} style={{ background: "none", border: "none", color: C.ink50, cursor: "pointer", fontSize: 12 }}>Use now instead</button>
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <input type="date" style={{ ...inputStyle, background: "#fff" }} value={date} max={todayStr()} onChange={(e) => { setDate(e.target.value); setError(""); }} />
-        <input type="time" style={{ ...inputStyle, background: "#fff" }} value={time} onChange={(e) => { setTime(e.target.value); setError(""); }} />
-      </div>
-      {error && <div style={{ fontSize: 12, color: C.redDeep, marginTop: 6 }}>{error}</div>}
-    </div>
-  );
-}
-
 function dayKeys() {
   return {
     today: todayStr(),
@@ -3415,8 +3419,45 @@ function inDayBucket(dateStr, bucket, keys) {
 const SHIPMENT_DAY_CHIPS = [["today", "Today"], ["yesterday", "Yesterday"], ["d2", "2 Days Ago"], ["older", "Older"], ["all", "All"]];
 const HOLD_REASONS = ["Waiting for consignee to collect", "Customs / documents pending", "Under inspection", "Consignee not reachable", "Damaged — awaiting instructions", "Other"];
 
+function BackdateDateTime({ active, setActive, date, setDate, time, setTime, error, setError, label }) {
+  if (!active) {
+    return (
+      <button type="button" onClick={() => { setActive(true); setError(""); }} style={{
+        background: "none", border: "none", color: C.navy, fontSize: 12.5, fontWeight: 600,
+        cursor: "pointer", textDecoration: "underline", padding: 0, marginBottom: 14, display: "block",
+      }}>{label}</button>
+    );
+  }
+  return (
+    <div style={{ background: "#FCEFE0", border: `1px solid #F2D6A6`, borderRadius: 9, padding: "12px 14px", marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.amberDeep, letterSpacing: 0.3 }}>ACTUAL DATE &amp; TIME</span>
+        <button type="button" onClick={() => { setActive(false); setError(""); }} style={{ background: "none", border: "none", color: C.ink50, cursor: "pointer", fontSize: 12 }}>Use now instead</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input type="date" style={{ ...inputStyle, background: "#fff" }} value={date} max={todayStr()} onChange={(e) => { setDate(e.target.value); setError(""); }} />
+        <input type="time" style={{ ...inputStyle, background: "#fff" }} value={time} onChange={(e) => { setTime(e.target.value); setError(""); }} />
+      </div>
+      {error && <div style={{ fontSize: 12, color: C.redDeep, marginTop: 6 }}>{error}</div>}
+    </div>
+  );
+}
+
+function OriginField({ value, onChange, custom }) {
+  const name = originName(value, custom);
+  return (
+    <Field label="Origin (short code, e.g. AUH, LON)">
+      <input style={{ ...inputStyle, fontFamily: FONT_MONO, textTransform: "uppercase" }} value={value} onChange={(e) => onChange(e.target.value.toUpperCase())} maxLength={4} autoCapitalize="characters" placeholder="AUH" />
+      {value.trim() && (
+        <div style={{ fontSize: 12, marginTop: 4, color: name ? C.greenDeep : C.amberDeep }}>{name ? `✓ ${name}` : "Code not in the list — it will be saved as typed (admin can add its name)."}</div>
+      )}
+    </Field>
+  );
+}
+
 function ShipmentsScreen({ session, shipments, persistShipments, settings, persistSettings, notify, sendReport }) {
   const threshold = settings.shipment_threshold_days || 3;
+  const custom = settings.origin_custom || {};
   const keys = dayKeys();
   const [day, setDay] = useState("today");
   const [mode, setMode] = useState("arrived");
@@ -3426,6 +3467,7 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
   const [releasing, setReleasing] = useState(null);
   const [noting, setNoting] = useState(null);
   const [showThreshold, setShowThreshold] = useState(false);
+  const [showCodes, setShowCodes] = useState(false);
 
   const inWh = useMemo(() => shipments.filter((s) => s.status === "IN_WAREHOUSE").sort((a, b) => (a.date_in + a.time_in).localeCompare(b.date_in + b.time_in)), [shipments]);
   const overdue = inWh.filter((s) => shipmentState(s, threshold) === "OVERDUE");
@@ -3446,7 +3488,7 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
   const matches = (s) => {
     if (!q.trim()) return true;
     const t = q.toLowerCase();
-    return [s.awb, s.arrival_no, s.brought_by_name, s.brought_by_company, s.taken_by_name, s.taken_by_company].some((v) => (v || "").toLowerCase().includes(t));
+    return [s.arrival_no, s.awb, s.origin, originName(s.origin, custom), s.brought_by_name, s.brought_by_id, s.taken_by_name, s.taken_by_id, s.destination].some((v) => (v || "").toLowerCase().includes(t));
   };
   const list = shipments.filter((s) => inMode(s, day, mode)).filter(matches).sort((a, b) => {
     if (mode === "remaining") return (a.date_in + a.time_in).localeCompare(b.date_in + b.time_in);
@@ -3458,23 +3500,23 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
     ...fields, status: "IN_WAREHOUSE",
     date_in: backdateDate || todayStr(now), time_in: backdateTime ? `${backdateTime}:00` : nowTimeStr(now),
     received_by: session.name, date_out: null, time_out: null,
-    taken_by_name: "", taken_by_company: "", taken_by_phone: "", taken_by_id: "", released_by: null, remarks_out: "",
+    taken_by_name: "", taken_by_company: "", taken_by_phone: "", taken_by_id: "", destination: "", released_by: null, remarks_out: "",
     hold_notes: [], created_at: Date.now(), updated_at: Date.now(),
   });
 
   const receive = async (data) => {
     const now = new Date();
-    const { backdateDate, backdateTime, arrival_no, ...fields } = data;
-    const rec = { id: uid("sh_"), arrival_no: arrival_no || "", ...baseRecord(now, fields, backdateDate, backdateTime) };
+    const { backdateDate, backdateTime, ...fields } = data;
+    const rec = { id: uid("sh_"), ...baseRecord(now, fields, backdateDate, backdateTime) };
     await persistShipments([rec, ...shipments]);
     setShowReceive(false);
-    notify(`Shipment ${rec.awb} received`);
+    notify(`Shipment ${shipRef(rec)} received`);
   };
 
   const receiveBulk = async (items, shared) => {
     const now = new Date();
     const { backdateDate, backdateTime, ...fields } = shared;
-    const recs = items.map((it) => ({ id: uid("sh_"), awb: it.awb, arrival_no: it.arrival || "", ...baseRecord(now, fields, backdateDate, backdateTime) }));
+    const recs = items.map((it) => ({ id: uid("sh_"), arrival_no: it.arrival || "", awb: it.awb || "", origin: (it.origin || "").toUpperCase(), ...baseRecord(now, fields, backdateDate, backdateTime) }));
     await persistShipments([...recs, ...shipments]);
     setShowScan(false);
     setDay("today"); setMode("arrived");
@@ -3491,7 +3533,7 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
     };
     await persistShipments(shipments.map((s) => (s.id === shipment.id ? updated : s)));
     setReleasing(null);
-    notify(`Shipment ${shipment.awb} released`);
+    notify(`Shipment ${shipRef(shipment)} released`);
   };
 
   const addNote = async (shipment, text) => {
@@ -3506,21 +3548,20 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
   const exportCSV = () => {
     const dk = dayKeys();
     const headers = [
-      { label: "AWB", get: (r) => r.awb }, { label: "Arrival No.", get: (r) => r.arrival_no || "" }, { label: "Status", get: (r) => r.status },
+      { label: "Arrival No.", get: (r) => r.arrival_no || "" }, { label: "AWB", get: (r) => r.awb || "" }, { label: "Status", get: (r) => r.status },
+      { label: "Origin Code", get: (r) => r.origin || "" }, { label: "Origin", get: (r) => originName(r.origin, custom) },
       { label: "Arrived Date", get: (r) => r.date_in }, { label: "Arrived Day", get: (r) => dayLabelFor(r.date_in, dk) }, { label: "Time In", get: (r) => r.time_in },
-      { label: "Brought By", get: (r) => r.brought_by_name }, { label: "Brought By Company", get: (r) => r.brought_by_company },
-      { label: "Brought By Phone", get: (r) => r.brought_by_phone }, { label: "Brought By ID/Card", get: (r) => r.brought_by_id },
-      { label: "Received By (Guard)", get: (r) => r.received_by },
+      { label: "Brought By", get: (r) => r.brought_by_name }, { label: "Brought By ID", get: (r) => r.brought_by_id || "" },
       { label: "Date Out", get: (r) => r.date_out || "" }, { label: "Time Out", get: (r) => r.time_out || "" },
-      { label: "Taken By", get: (r) => r.taken_by_name }, { label: "Taken By Company", get: (r) => r.taken_by_company },
-      { label: "Taken By Phone", get: (r) => r.taken_by_phone }, { label: "Taken By ID/Card", get: (r) => r.taken_by_id },
-      { label: "Released By (Guard)", get: (r) => r.released_by || "" },
+      { label: "Destination", get: (r) => r.destination || "" },
+      { label: "Taken By (Staff)", get: (r) => r.taken_by_name }, { label: "Staff Number", get: (r) => r.taken_by_id || "" },
       { label: "Days in Warehouse", get: (r) => {
         const end = r.status === "DISPATCHED" ? new Date(`${r.date_out}T${r.time_out}`).getTime() : Date.now();
         return (Math.max(0, end - new Date(`${r.date_in}T${r.time_in}`).getTime()) / 86400000).toFixed(1);
       } },
       { label: "Why Still Here (notes)", get: (r) => (r.hold_notes || []).map((n) => `${n.date} ${n.by}: ${n.text}`).join(" | ") },
       { label: "Remarks In", get: (r) => r.remarks_in || "" }, { label: "Remarks Out", get: (r) => r.remarks_out || "" },
+      { label: "Logged In By (system)", get: (r) => r.received_by || "" }, { label: "Logged Out By (system)", get: (r) => r.released_by || "" },
     ];
     downloadFile(`shipments-${todayStr()}.csv`, toCSV(shipments, headers), "text/csv");
   };
@@ -3543,7 +3584,10 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
       <div style={{ display: "flex", gap: 14, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
         <span style={{ fontSize: 12.5, color: C.ink50 }}>Flag after <b style={{ color: C.ink }}>{threshold} day{threshold === 1 ? "" : "s"}</b> in warehouse</span>
         {session.role === "admin" && (
-          <button onClick={() => setShowThreshold(true)} style={{ background: "none", border: "none", color: C.navy, fontSize: 12, fontWeight: 600, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Change</button>
+          <>
+            <button onClick={() => setShowThreshold(true)} style={{ background: "none", border: "none", color: C.navy, fontSize: 12, fontWeight: 600, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Change</button>
+            <button onClick={() => setShowCodes(true)} style={{ background: "none", border: "none", color: C.navy, fontSize: 12, fontWeight: 600, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Origin codes</button>
+          </>
         )}
         <button onClick={exportCSV} style={{ background: "none", border: "none", color: C.navy, fontSize: 12, fontWeight: 600, cursor: "pointer", textDecoration: "underline", padding: 0, display: "flex", alignItems: "center", gap: 4 }}>
           <Download size={13} /> Export CSV
@@ -3568,7 +3612,7 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
             <AlertTriangle size={16} color={C.redDeep} />
             <span style={{ fontWeight: 700, fontSize: 13.5, color: C.redDeep }}>{overdue.length} overdue — held longer than {threshold} day(s)</span>
           </div>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: C.redDeep }}>{overdue.slice(0, 8).map((s) => s.awb).join(", ")}{overdue.length > 8 ? "…" : ""}</div>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 12, color: C.redDeep }}>{overdue.slice(0, 8).map((s) => shipRef(s)).join(", ")}{overdue.length > 8 ? "…" : ""}</div>
         </div>
       )}
 
@@ -3595,7 +3639,7 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
 
       <div style={{ position: "relative", marginBottom: 10 }}>
         <Search size={15} style={{ position: "absolute", left: 10, top: 11, color: C.ink50 }} />
-        <input style={{ ...inputStyle, paddingLeft: 32 }} placeholder="Search AWB, arrival no., name, or company…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input style={{ ...inputStyle, paddingLeft: 32 }} placeholder="Search arrival no., origin, name, ID, destination…" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
 
       <div style={{ fontSize: 12, color: C.ink50, marginBottom: 8 }}>
@@ -3610,24 +3654,26 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
           const st = shipmentState(s, threshold);
           const border = st === "OVERDUE" ? "#FECACA" : st === "DUE_SOON" ? "#FDE68A" : C.line;
           const notes = s.hold_notes || [];
+          const from = originLabel(s.origin, custom);
           return (
             <div key={s.id} style={{ background: "#fff", border: `1px solid ${border}`, borderLeft: `4px solid ${st === "OVERDUE" ? C.red : st === "DUE_SOON" ? C.amber : st === "DISPATCHED" ? C.ink50 : C.green}`, borderRadius: 10, padding: "12px 14px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
-                    <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, color: C.ink }}>{s.awb}</span>
+                    <span style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, color: C.ink }}>{shipRef(s)}</span>
                     {st === "OVERDUE" && <Badge tone="missing">OVERDUE</Badge>}
                     {st === "DUE_SOON" && <Badge tone="overtime">DUE SOON</Badge>}
                     {st === "OK" && <Badge tone="inside">IN WAREHOUSE</Badge>}
                     {st === "DISPATCHED" && <Badge tone="out">RELEASED {dayLabelFor(s.date_out, keys).toUpperCase()}</Badge>}
                     <Badge tone="neutral">ARRIVED {dayLabelFor(s.date_in, keys).toUpperCase()}</Badge>
                   </div>
-                  {s.arrival_no && <div style={{ fontSize: 12, color: C.navy, fontWeight: 600, marginTop: 3 }}>Arrival no. {s.arrival_no}</div>}
+                  {s.arrival_no && s.awb && <div style={{ fontSize: 11.5, color: C.ink50, marginTop: 3, fontFamily: FONT_MONO }}>AWB {s.awb}</div>}
+                  {from && <div style={{ fontSize: 12.5, color: C.navy, fontWeight: 600, marginTop: 4 }}>From: {from}</div>}
                   <div style={{ fontSize: 12.5, color: C.ink, marginTop: 5 }}>
-                    <b>Brought by:</b> {s.brought_by_name}{s.brought_by_company ? ` (${s.brought_by_company})` : ""}{s.brought_by_phone ? ` · ${s.brought_by_phone}` : ""}{s.brought_by_id ? ` · ID ${s.brought_by_id}` : ""}
+                    <b>Brought by:</b> {s.brought_by_name || "—"}{s.brought_by_id ? ` · ID ${s.brought_by_id}` : ""}
                   </div>
                   <div style={{ fontSize: 11.5, color: C.ink50, marginTop: 2 }}>
-                    Received {fmtDate(s.date_in)} {fmtTime(s.time_in)} · logged by {s.received_by}{s.remarks_in ? ` · ${s.remarks_in}` : ""}
+                    Received {fmtDate(s.date_in)} {fmtTime(s.time_in)}{s.remarks_in ? ` · ${s.remarks_in}` : ""}
                   </div>
                   {s.status === "IN_WAREHOUSE" ? (
                     <div style={{ fontSize: 12.5, fontWeight: 600, marginTop: 5, color: st === "OVERDUE" ? C.redDeep : st === "DUE_SOON" ? C.amberDeep : C.greenDeep }}>
@@ -3636,10 +3682,11 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
                   ) : (
                     <>
                       <div style={{ fontSize: 12.5, color: C.ink, marginTop: 5 }}>
-                        <b>Taken by:</b> {s.taken_by_name}{s.taken_by_company ? ` (${s.taken_by_company})` : ""}{s.taken_by_phone ? ` · ${s.taken_by_phone}` : ""}{s.taken_by_id ? ` · ID ${s.taken_by_id}` : ""}
+                        <b>Taken by (staff):</b> {s.taken_by_name || "—"}{s.taken_by_id ? ` · Staff no. ${s.taken_by_id}` : ""}
                       </div>
+                      {s.destination && <div style={{ fontSize: 12.5, color: C.navy, fontWeight: 600, marginTop: 2 }}>Taken to: {s.destination}</div>}
                       <div style={{ fontSize: 11.5, color: C.ink50, marginTop: 2 }}>
-                        Released {fmtDate(s.date_out)} {fmtTime(s.time_out)} · logged by {s.released_by}{s.remarks_out ? ` · ${s.remarks_out}` : ""}
+                        Released {fmtDate(s.date_out)} {fmtTime(s.time_out)}{s.remarks_out ? ` · ${s.remarks_out}` : ""}
                       </div>
                       <div style={{ fontSize: 11.5, color: C.ink50, marginTop: 2 }}>
                         Total time in warehouse: {fmtAgeMs(new Date(`${s.date_out}T${s.time_out}`).getTime() - new Date(`${s.date_in}T${s.time_in}`).getTime())}
@@ -3650,7 +3697,7 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
                     <div style={{ marginTop: 6 }}>
                       {notes.slice(-2).map((n, i) => (
                         <div key={i} style={{ fontSize: 12, color: C.amberDeep, background: "#FEF3C7", borderRadius: 6, padding: "5px 8px", marginTop: 4 }}>
-                          <b>Why still here — {dayLabelFor(n.date, keys)}:</b> {n.text} <span style={{ color: C.ink50 }}>({n.by})</span>
+                          <b>Why still here — {dayLabelFor(n.date, keys)}:</b> {n.text}
                         </div>
                       ))}
                       {notes.length > 2 && <div style={{ fontSize: 11, color: C.ink50, marginTop: 3 }}>+ {notes.length - 2} earlier note{notes.length - 2 === 1 ? "" : "s"}</div>}
@@ -3669,11 +3716,12 @@ function ShipmentsScreen({ session, shipments, persistShipments, settings, persi
         })}
       </div>
 
-      {showScan && <ManifestScanModal existing={shipments} onClose={() => setShowScan(false)} onSave={receiveBulk} />}
-      {showReceive && <ShipmentReceiveForm existing={shipments} onClose={() => setShowReceive(false)} onSave={receive} />}
+      {showScan && <ManifestScanModal existing={shipments} custom={custom} onClose={() => setShowScan(false)} onSave={receiveBulk} />}
+      {showReceive && <ShipmentReceiveForm existing={shipments} custom={custom} onClose={() => setShowReceive(false)} onSave={receive} />}
       {releasing && <ShipmentReleaseForm shipment={releasing} onClose={() => setReleasing(null)} onSave={(data) => release(releasing, data)} />}
       {noting && <ShipmentNoteModal shipment={noting} onClose={() => setNoting(null)} onSave={(text) => addNote(noting, text)} />}
       {showThreshold && <ShipmentThresholdModal settings={settings} persistSettings={persistSettings} notify={notify} onClose={() => setShowThreshold(false)} />}
+      {showCodes && <ShipmentOriginCodesModal settings={settings} persistSettings={persistSettings} notify={notify} onClose={() => setShowCodes(false)} />}
     </div>
   );
 }
@@ -3682,7 +3730,7 @@ function ShipmentNoteModal({ shipment, onClose, onSave }) {
   const [text, setText] = useState("");
   return (
     <Modal title="Why is it still here?" onClose={onClose}>
-      <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 14, marginBottom: 4 }}>{shipment.awb}</div>
+      <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 14, marginBottom: 4 }}>{shipRef(shipment)}</div>
       <div style={{ fontSize: 12, color: C.ink50, marginBottom: 12 }}>In warehouse for {fmtAgeMs(shipmentAgeMs(shipment))}. The reason is saved with today's date and goes into the manager report.</div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
         {HOLD_REASONS.map((r) => (
@@ -3699,39 +3747,57 @@ function ShipmentNoteModal({ shipment, onClose, onSave }) {
 }
 
 /* ---------------------------------------------------------------------
-   MANIFEST SCAN — take photo(s) of a cargo manifest and receive every
-   AWB on it in one go. On the hosted Claude link, Claude reads the photo
-   (so it needs a signed-in Claude viewer); elsewhere a basic in-browser
-   scanner is used, and pasting a list always works. The review step is
-   the safety net — nothing is saved until the guard confirms the list.
+   MANIFEST SCAN — photo(s) of the manifest → every arrival number (and
+   origin) in one go. On the hosted Claude link Claude reads each photo
+   (accurate, but needs a signed-in Claude viewer); elsewhere a basic
+   in-browser scanner is used. Pasting a list always works. Nothing is
+   saved until the guard reviews and confirms.
 --------------------------------------------------------------------- */
-const MANIFEST_PROMPT = `These are photos of a cargo/shipment manifest listing shipments arriving at a warehouse. Extract EVERY shipment line from all the photos.
-For each line give:
-- "awb": the AWB / airway bill / consignment number, copied digit-for-digit exactly as printed (keep any dashes).
-- "arrival": the arrival / manifest / reference number on the same line if there is one, otherwise "".
-Do not guess unreadable digits — skip a line you truly cannot read. Ignore headers, totals, page numbers, dates and weights.
-Reply with ONLY a JSON array, for example: [{"awb":"176-48201935","arrival":"A-1042"},{"awb":"157-30918822","arrival":""}]. If you find none, reply [].`;
+const MANIFEST_PROMPT = `This is a photo of a cargo import manifest listing shipments that arrived. Read the WHOLE sheet, top to bottom, every single row — do not stop early, do not skip rows, even if the print is small, faint or the photo is slightly tilted.
+For each shipment row extract:
+- "arrival": the ARRIVAL number (use the column headed Arrival / Arrival No. / ARR if there is one).
+- "awb": the AWB / airway bill number if the row has one, otherwise "".
+- "origin": the ORIGIN as the short 3-letter code (for example AUH, LON, DXB, BOM). Copy exactly as printed.
+Ignore every other column (company, consignee, shipper, pieces, weight, description, dates, totals, page numbers).
+Copy digits and letters exactly. If a field on a row is unreadable use "" for that field but still include the row. Never invent numbers.
+Reply with ONLY a JSON array in the order the rows appear, for example:
+[{"arrival":"1042215","awb":"176-48201935","origin":"AUH"},{"arrival":"1042216","awb":"","origin":"LON"}]
+If you cannot find any shipment rows, reply [].`;
 
-function parseAwbText(text) {
+function parseManifestText(text) {
   const out = [];
-  String(text || "").split(/[\n\r,;]+/).forEach((piece) => {
-    const t = piece.trim();
+  String(text || "").split(/[\n\r;]+/).forEach((line) => {
+    const t = line.trim();
     if (!t) return;
-    const parts = t.split(/\s+/);
-    if (parts.length > 1 && parts.every((p) => p.length >= 6)) parts.forEach((p) => out.push({ awb: p, arrival: "" }));
-    else out.push({ awb: t, arrival: "" });
+    const parts = t.split(/[,\t]+/).map((x) => x.trim()).filter(Boolean);
+    if (parts.length >= 2 && /^[A-Za-z]{3,4}$/.test(parts[parts.length - 1])) {
+      out.push({ arrival: parts[0], awb: parts.length > 2 ? parts[1] : "", origin: parts[parts.length - 1].toUpperCase() });
+    } else if (parts.length === 1) {
+      const sp = t.split(/\s+/);
+      if (sp.length > 1 && sp.every((p) => p.length >= 5)) sp.forEach((p) => out.push({ arrival: p, awb: "", origin: "" }));
+      else out.push({ arrival: t, awb: "", origin: "" });
+    } else {
+      parts.forEach((p) => out.push({ arrival: p, awb: "", origin: "" }));
+    }
   });
   return out;
 }
-function extractAwbsFromOcr(text) {
-  const out = []; const seen = new Set();
-  const re = /\b\d{3}[-\s]\d{8}\b|\b\d{8,14}\b/g;
-  let m;
-  while ((m = re.exec(text || "")) !== null) {
-    const v = m[0].replace(/\s+/g, "-");
-    if (!seen.has(v)) { seen.add(v); out.push({ awb: v, arrival: "" }); }
-  }
-  return out;
+function extractRowsFromOcr(text, custom) {
+  const rows = []; const seen = new Set();
+  String(text || "").split(/\r?\n/).forEach((line) => {
+    const awbM = /\b\d{3}[-\s]\d{8}\b/.exec(line);
+    const awb = awbM ? awbM[0].replace(/\s+/, "-") : "";
+    const rest = awbM ? line.replace(awbM[0], " ") : line;
+    const nums = rest.match(/\b[A-Z]{0,3}\d{5,12}\b/g) || [];
+    const arrival = nums[0] || "";
+    let origin = "";
+    (rest.match(/\b[A-Z]{3}\b/g) || []).forEach((c) => { if (!origin && (ORIGIN_NAMES[c] || (custom && custom[c]))) origin = c; });
+    const key = (arrival || awb).toUpperCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    rows.push({ arrival, awb, origin });
+  });
+  return rows;
 }
 async function getSampleImageCap() {
   try {
@@ -3742,21 +3808,58 @@ async function getSampleImageCap() {
     return lim && lim.images ? { sample: s, limits: lim } : null;
   } catch { return null; }
 }
-function downscaleImage(file, maxDim = 1800) {
-  return new Promise((resolve) => {
+function loadImageEl(file) {
+  return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    img.onload = () => resolve({ img, url });
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image decode failed")); };
+    img.src = url;
+  });
+}
+// Keeps photos sharp but small enough to upload: re-encode large / unusual files as JPEG.
+async function prepareImageForClaude(file, mediaTypes) {
+  const okType = !mediaTypes || mediaTypes.length === 0 || mediaTypes.includes(file.type);
+  if (okType && file.size <= 4000000) return file;
+  try {
+    const { img, url } = await loadImageEl(file);
+    let dim = 3000, q = 0.92, blob = file;
+    for (let i = 0; i < 4; i++) {
+      const scale = Math.min(1, dim / Math.max(img.width, img.height));
       const c = document.createElement("canvas");
       c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
       c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url);
-      c.toBlob((b) => resolve(b || file), "image/jpeg", 0.9);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
-    img.src = url;
-  });
+      blob = await new Promise((res) => c.toBlob((b) => res(b), "image/jpeg", q));
+      if (blob && blob.size <= 4000000) break;
+      dim = Math.round(dim * 0.8); q = Math.max(0.7, q - 0.07);
+    }
+    URL.revokeObjectURL(url);
+    return blob || file;
+  } catch { return file; }
+}
+// For the basic scanner: upscale, grayscale and stretch contrast so small print reads better.
+async function prepareImageForOcr(file) {
+  try {
+    const { img, url } = await loadImageEl(file);
+    const target = 2800;
+    const scale = Math.min(2.5, target / Math.max(img.width, img.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+    const ctx = c.getContext("2d");
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
+    const data = ctx.getImageData(0, 0, c.width, c.height);
+    const px = data.data; const hist = new Array(256).fill(0);
+    for (let i = 0; i < px.length; i += 4) { const g = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]); px[i] = px[i + 1] = px[i + 2] = g; hist[g]++; }
+    const total = px.length / 4; let acc = 0, lo = 0, hi = 255;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > total * 0.02) { lo = v; break; } }
+    acc = 0;
+    for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > total * 0.02) { hi = v; break; } }
+    const span = Math.max(1, hi - lo);
+    for (let i = 0; i < px.length; i += 4) { const g = Math.max(0, Math.min(255, Math.round(((px[i] - lo) / span) * 255))); px[i] = px[i + 1] = px[i + 2] = g; }
+    ctx.putImageData(data, 0, 0);
+    return await new Promise((res) => c.toBlob((b) => res(b || file), "image/png"));
+  } catch { return file; }
 }
 function loadScriptOnce(src) {
   return new Promise((resolve, reject) => {
@@ -3767,28 +3870,27 @@ function loadScriptOnce(src) {
 }
 function friendlyScanError(e) {
   const code = e && e.code;
-  if (code === "not_granted") return "Claude access was declined for this page. You can still paste the list below.";
+  if (code === "not_granted") return "Claude access was declined for this page. You can still paste the list.";
   if (code === "rate_limited") return "Too many scans just now — wait a minute and try again, or paste the list.";
-  if (code === "image_rejected") return "One of the photos couldn't be used (wrong type or too large). Try retaking it.";
+  if (code === "image_rejected") return "That photo couldn't be used (wrong type or too large). Try retaking it.";
   if (code === "invalid_json" || code === "empty_completion") return "Couldn't read that clearly. Try a closer, brighter, flatter photo — or paste the list.";
   if (code === "sampling_disabled" || code === "session_expired") return "Claude isn't available for this account right now. You can still paste the list.";
   if (code === "cancelled") return "";
   return "Scanning didn't work this time. Check your connection and try again, or paste the list.";
 }
 
-function ManifestScanModal({ existing, onClose, onSave }) {
+function ManifestScanModal({ existing, custom, onClose, onSave }) {
   const [step, setStep] = useState("get");
   const [files, setFiles] = useState([]);
   const [previews, setPreviews] = useState([]);
   const [pasteText, setPasteText] = useState("");
+  const [expectedTotal, setExpectedTotal] = useState("");
   const [rows, setRows] = useState([]);
   const [scanCap, setScanCap] = useState("checking");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [err, setErr] = useState("");
   const [name, setName] = useState("");
-  const [company, setCompany] = useState("");
-  const [phone, setPhone] = useState("");
   const [idCard, setIdCard] = useState("");
   const [remarks, setRemarks] = useState("");
   const [backdate, setBackdate] = useState(false);
@@ -3815,8 +3917,21 @@ function ManifestScanModal({ existing, onClose, onSave }) {
   };
 
   const goReview = (found) => {
-    setRows(found.map((r) => ({ rid: uid("r_"), awb: String(r.awb || "").trim(), arrival: String(r.arrival || "").trim(), include: true })));
+    const fresh = found.map((r) => ({ rid: uid("r_"), arrival: String(r.arrival || "").trim(), awb: String(r.awb || "").trim(), origin: String(r.origin || "").trim().toUpperCase(), include: true }));
+    setRows((prev) => [...prev, ...fresh]);
+    setFiles([]); setPasteText("");
     setStep("review");
+  };
+
+  const askClaude = async (cap, file) => {
+    const img = await prepareImageForClaude(file, cap.limits.images && cap.limits.images.mediaTypes);
+    try {
+      return await cap.sample.json(MANIFEST_PROMPT, { images: [img], cache: false, modelTier: "complex" });
+    } catch (e) {
+      const c = e && e.code;
+      if (c === "not_granted" || c === "rate_limited" || c === "image_rejected" || c === "cancelled") throw e;
+      return await cap.sample.json(MANIFEST_PROMPT, { images: [img], cache: false });
+    }
   };
 
   const runScan = async () => {
@@ -3825,28 +3940,33 @@ function ManifestScanModal({ existing, onClose, onSave }) {
     try {
       let found = [];
       if (scanCap && scanCap !== "checking") {
-        const max = (scanCap.limits.images && scanCap.limits.images.maxCount) || 4;
-        for (let i = 0; i < files.length; i += max) {
-          const group = files.slice(i, i + max);
-          setProgress(`Claude is reading photo${group.length > 1 ? "s" : ""} ${i + 1}–${i + group.length} of ${files.length}…`);
-          const result = await scanCap.sample.json(MANIFEST_PROMPT, { images: group, cache: false });
+        for (let i = 0; i < files.length; i++) {
+          setProgress(`Claude is reading photo ${i + 1} of ${files.length} — this can take a little while for a long list…`);
+          const result = await askClaude(scanCap, files[i]);
           (Array.isArray(result) ? result : []).forEach((it) => {
-            if (typeof it === "string") found.push({ awb: it, arrival: "" });
-            else if (it && it.awb) found.push({ awb: String(it.awb), arrival: it.arrival ? String(it.arrival) : "" });
+            if (typeof it === "string") found.push({ arrival: it, awb: "", origin: "" });
+            else if (it && (it.arrival || it.awb)) found.push({ arrival: it.arrival ? String(it.arrival) : "", awb: it.awb ? String(it.awb) : "", origin: it.origin ? String(it.origin) : "" });
           });
         }
       } else {
         setProgress("Loading basic scanner…");
         if (!window.Tesseract) await loadScriptOnce("https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js");
-        for (let i = 0; i < files.length; i++) {
-          setProgress(`Reading photo ${i + 1} of ${files.length}…`);
-          const blob = await downscaleImage(files[i]);
-          const res = await window.Tesseract.recognize(blob, "eng");
-          found = found.concat(extractAwbsFromOcr(res.data.text));
-        }
+        const worker = await window.Tesseract.createWorker("eng");
+        try {
+          for (let i = 0; i < files.length; i++) {
+            setProgress(`Reading photo ${i + 1} of ${files.length} (basic scanner, two passes)…`);
+            const blob = await prepareImageForOcr(files[i]);
+            let text = "";
+            for (const psm of ["6", "4"]) {
+              try { await worker.setParameters({ tessedit_pageseg_mode: psm }); } catch { /* older builds */ }
+              const res = await worker.recognize(blob);
+              text += "\n" + res.data.text;
+            }
+            found = found.concat(extractRowsFromOcr(text, custom));
+          }
+        } finally { try { await worker.terminate(); } catch { /* ignore */ } }
       }
-      found = found.filter((f) => f.awb && f.awb.trim().length >= 4);
-      if (!found.length) { setErr("No AWB numbers were found in the photo(s). Try a closer, brighter, flatter photo — or paste the list."); return; }
+      if (!found.length) { setErr("No shipment numbers were found in the photo(s). Try a closer, brighter, flatter photo — or paste the list."); return; }
       goReview(found);
     } catch (e) {
       const msg = friendlyScanError(e);
@@ -3857,40 +3977,38 @@ function ManifestScanModal({ existing, onClose, onSave }) {
   };
 
   const usePaste = () => {
-    const found = parseAwbText(pasteText);
-    if (!found.length) { setErr("Type or paste at least one AWB number."); return; }
+    const found = parseManifestText(pasteText);
+    if (!found.length) { setErr("Type or paste at least one arrival number."); return; }
     goReview(found);
   };
 
-  const whSet = useMemo(() => new Set(existing.filter((s) => s.status === "IN_WAREHOUSE").map((s) => s.awb)), [existing]);
+  const whSet = useMemo(() => new Set(existing.filter((s) => s.status === "IN_WAREHOUSE").map((s) => shipKey(s))), [existing]);
   const statuses = useMemo(() => {
     const seen = new Set();
     return rows.map((r) => {
-      const a = r.awb.trim().toUpperCase();
-      if (!a) return "EMPTY";
-      if (whSet.has(a)) return "IN_WH";
-      if (seen.has(a)) return "DUP";
-      seen.add(a);
+      const k = (r.arrival || r.awb).trim().toUpperCase();
+      if (!k) return "EMPTY";
+      if (whSet.has(k)) return "IN_WH";
+      if (seen.has(k)) return "DUP";
+      seen.add(k);
       return "NEW";
     });
   }, [rows, whSet]);
   const toReceive = rows.filter((r, i) => r.include && statuses[i] === "NEW");
   const skipped = rows.length - toReceive.length;
+  const expected = Number(expectedTotal) || 0;
+  const countedRows = rows.filter((r, i) => statuses[i] !== "EMPTY").length;
 
   const updateRow = (rid, patch) => setRows((list) => list.map((r) => (r.rid === rid ? { ...r, ...patch } : r)));
   const removeRow = (rid) => setRows((list) => list.filter((r) => r.rid !== rid));
-  const addRow = () => setRows((list) => [...list, { rid: uid("r_"), awb: "", arrival: "", include: true }]);
+  const addRow = () => setRows((list) => [...list, { rid: uid("r_"), arrival: "", awb: "", origin: "", include: true }]);
 
   const save = () => {
     if (!name.trim() || toReceive.length === 0) return;
     if (backdate && new Date(`${bdDate}T${bdTime}:00`).getTime() > Date.now() + 60000) { setBdError("That date/time is in the future"); return; }
     onSave(
-      toReceive.map((r) => ({ awb: r.awb.trim().toUpperCase(), arrival: r.arrival.trim() })),
-      {
-        brought_by_name: name.trim(), brought_by_company: company.trim(), brought_by_phone: phone.trim(),
-        brought_by_id: idCard.trim(), remarks_in: remarks.trim(),
-        backdateDate: backdate ? bdDate : null, backdateTime: backdate ? bdTime : null,
-      },
+      toReceive.map((r) => ({ arrival: r.arrival.trim().toUpperCase(), awb: r.awb.trim().toUpperCase(), origin: r.origin.trim().toUpperCase() })),
+      { brought_by_name: name.trim(), brought_by_id: idCard.trim(), remarks_in: remarks.trim(), backdateDate: backdate ? bdDate : null, backdateTime: backdate ? bdTime : null },
     );
   };
 
@@ -3899,10 +4017,13 @@ function ManifestScanModal({ existing, onClose, onSave }) {
   if (step === "get") {
     return (
       <Modal title="Scan or Paste Manifest" onClose={onClose} wide>
-        <div style={{ fontSize: 12.5, color: C.ink50, lineHeight: 1.55, marginBottom: 12 }}>
+        <div style={{ fontSize: 12.5, color: C.ink50, lineHeight: 1.55, marginBottom: 10 }}>
           {scanCap === "checking" ? "Checking what scanning is available…" : scanCap
-            ? <>Take a photo of the manifest (or several, for a long one) and <b>Claude reads every AWB for you</b>. You'll review the list before anything is saved.</>
-            : <>Basic scanner: reads the photo on this device — it can miss or misread digits, so check the list carefully. (Pasting a list always works.)</>}
+            ? <>Photograph the manifest and <b>Claude reads every arrival number and origin for you</b>. You'll review the list before anything is saved.</>
+            : <>Basic scanner on this device — it can miss or misread digits, so check the list carefully. For the most accurate scanning, use the Claude-hosted link. (Pasting a list always works.)</>}
+        </div>
+        <div style={{ background: C.paperDim, borderRadius: 8, padding: "8px 11px", fontSize: 12, color: C.ink50, marginBottom: 12, lineHeight: 1.5 }}>
+          <b style={{ color: C.ink }}>For the best result:</b> one page per photo, flat on a table, good light, the whole page in frame and the text sharp. Long manifest? Take one photo per page — you can scan more pages after this one.
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
@@ -3927,18 +4048,24 @@ function ManifestScanModal({ existing, onClose, onSave }) {
           </div>
         )}
 
+        <Field label="How many shipments does the manifest say there are? (optional — lets me warn if any were missed)">
+          <input type="number" min="1" style={inputStyle} value={expectedTotal} onChange={(e) => setExpectedTotal(e.target.value)} placeholder="e.g. 92" />
+        </Field>
+
+        {rows.length > 0 && <div style={{ fontSize: 12.5, color: C.navy, marginBottom: 8, fontWeight: 600 }}>{rows.length} already read — new results will be added to them.</div>}
         {err && <div style={{ background: "#FEE2E2", color: C.redDeep, borderRadius: 8, padding: "9px 11px", fontSize: 12.5, marginBottom: 12 }}>{err}</div>}
         {progress && <div style={{ fontSize: 12.5, color: C.navy, marginBottom: 10, fontWeight: 600 }}>{progress}</div>}
 
         <Btn full tone="navy" icon={Search} onClick={runScan} disabled={busy || files.length === 0}>
-          {busy ? "Reading…" : files.length ? `Read AWB numbers from ${files.length} photo${files.length > 1 ? "s" : ""}` : "Add a photo first"}
+          {busy ? "Reading…" : files.length ? `Read ${files.length} photo${files.length > 1 ? "s" : ""}` : "Add a photo first"}
         </Btn>
+        {rows.length > 0 && <div style={{ marginTop: 8 }}><Btn full tone="ghost" onClick={() => setStep("review")}>Back to the list ({rows.length})</Btn></div>}
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 0 10px" }}>
           <span style={{ flex: 1, height: 1, background: C.line }} /><span style={{ fontSize: 11.5, color: C.ink50, fontWeight: 600 }}>OR PASTE / TYPE A LIST</span><span style={{ flex: 1, height: 1, background: C.line }} />
         </div>
         <textarea style={{ ...inputStyle, minHeight: 90, fontFamily: FONT_MONO, fontSize: 13 }} value={pasteText} onChange={(e) => { setPasteText(e.target.value); setErr(""); }}
-          placeholder={"One AWB per line (or separated by commas)\n176-48201935\n176-48205567"} />
+          placeholder={"One shipment per line. Optional: arrival, origin\n1042215, AUH\n1042216, LON"} />
         <div style={{ height: 10 }} />
         <Btn full tone="paper" onClick={usePaste} disabled={busy || !pasteText.trim()}>Use this list</Btn>
       </Modal>
@@ -3946,34 +4073,46 @@ function ManifestScanModal({ existing, onClose, onSave }) {
   }
 
   return (
-    <Modal title={`Review ${rows.length} AWB${rows.length === 1 ? "" : "s"}`} onClose={onClose} wide>
-      <button type="button" onClick={() => setStep("get")} style={{ background: "none", border: "none", color: C.navy, fontSize: 12.5, fontWeight: 600, cursor: "pointer", padding: 0, marginBottom: 10 }}>← Back to photos</button>
+    <Modal title={`Review ${rows.length} shipment${rows.length === 1 ? "" : "s"}`} onClose={onClose} wide>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <button type="button" onClick={() => setStep("get")} style={{ background: "none", border: "none", color: C.navy, fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: 0 }}>+ Scan another page / photo</button>
+      </div>
+      {expected > 0 && (
+        <div style={{ background: countedRows === expected ? "#D1FAE5" : "#FEF3C7", color: countedRows === expected ? C.greenDeep : C.amberDeep, borderRadius: 8, padding: "9px 11px", fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>
+          {countedRows === expected ? `✓ ${countedRows} read — matches the manifest total.`
+            : countedRows < expected ? `Only ${countedRows} read but the manifest says ${expected}. ${expected - countedRows} may be missing — scan another page or add them below.`
+            : `${countedRows} read but the manifest says ${expected} — check for duplicates or wrong lines.`}
+        </div>
+      )}
       <div style={{ fontSize: 12.5, color: C.ink50, marginBottom: 10, lineHeight: 1.5 }}>Fix any number that was misread, untick or remove anything that shouldn't be received. Nothing is saved until you press the green button.</div>
 
-      <div style={{ maxHeight: 300, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 9, marginBottom: 8 }}>
+      <div style={{ maxHeight: 320, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 9, marginBottom: 8 }}>
         {rows.map((r, i) => {
           const st = statuses[i];
+          const oName = originName(r.origin, custom);
           return (
-            <div key={r.rid} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderBottom: i < rows.length - 1 ? `1px solid ${C.line}` : "none", background: st === "NEW" ? "#fff" : "#FFFBEB" }}>
-              <input type="checkbox" checked={r.include && st === "NEW"} disabled={st !== "NEW"} onChange={(e) => updateRow(r.rid, { include: e.target.checked })} />
-              <input style={{ ...inputStyle, fontFamily: FONT_MONO, padding: "6px 8px", flex: 2, minWidth: 0 }} value={r.awb} onChange={(e) => updateRow(r.rid, { awb: e.target.value })} placeholder="AWB" />
-              <input style={{ ...inputStyle, padding: "6px 8px", flex: 1, minWidth: 0 }} value={r.arrival} onChange={(e) => updateRow(r.rid, { arrival: e.target.value })} placeholder="Arrival no." />
-              <div style={{ flexShrink: 0 }}>{tag(st)}</div>
-              <button type="button" onClick={() => removeRow(r.rid)} title="Remove" style={{ background: "none", border: "none", color: C.redDeep, cursor: "pointer", padding: 2, flexShrink: 0 }}><X size={15} /></button>
+            <div key={r.rid} style={{ padding: "8px 10px", borderBottom: i < rows.length - 1 ? `1px solid ${C.line}` : "none", background: st === "NEW" ? "#fff" : "#FFFBEB" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={r.include && st === "NEW"} disabled={st !== "NEW"} onChange={(e) => updateRow(r.rid, { include: e.target.checked })} />
+                <input style={{ ...inputStyle, fontFamily: FONT_MONO, padding: "6px 8px", flex: 1, minWidth: 0 }} value={r.arrival} onChange={(e) => updateRow(r.rid, { arrival: e.target.value })} placeholder="Arrival no." />
+                <input style={{ ...inputStyle, fontFamily: FONT_MONO, padding: "6px 8px", flex: 1, minWidth: 0 }} value={r.awb} onChange={(e) => updateRow(r.rid, { awb: e.target.value })} placeholder="AWB (optional)" />
+                <button type="button" onClick={() => removeRow(r.rid)} title="Remove" style={{ background: "none", border: "none", color: C.redDeep, cursor: "pointer", padding: 2, flexShrink: 0 }}><X size={15} /></button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, paddingLeft: 24 }}>
+                <input style={{ ...inputStyle, fontFamily: FONT_MONO, padding: "5px 8px", width: 66, textTransform: "uppercase" }} value={r.origin} maxLength={4} onChange={(e) => updateRow(r.rid, { origin: e.target.value.toUpperCase() })} placeholder="ORG" />
+                <span style={{ fontSize: 11.5, color: oName ? C.greenDeep : C.ink50, flex: 1, minWidth: 0 }}>{oName || (r.origin ? "code not in list" : "origin")}</span>
+                <div style={{ flexShrink: 0 }}>{tag(st)}</div>
+              </div>
             </div>
           );
         })}
       </div>
-      <button type="button" onClick={addRow} style={{ background: "none", border: "none", color: C.navy, fontSize: 12.5, fontWeight: 600, cursor: "pointer", padding: 0, marginBottom: 14 }}>+ Add a missing AWB</button>
+      <button type="button" onClick={addRow} style={{ background: "none", border: "none", color: C.navy, fontSize: 12.5, fontWeight: 600, cursor: "pointer", padding: 0, marginBottom: 14 }}>+ Add a missing shipment</button>
 
       <div style={{ borderTop: `1px dashed ${C.line}`, paddingTop: 14 }}>
         <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>Brought in by (applies to all)</div>
         <Field label="Person's name"><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></Field>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <Field label="Company / Courier"><input style={inputStyle} value={company} onChange={(e) => setCompany(e.target.value)} /></Field>
-          <Field label="Phone (optional)"><input style={inputStyle} value={phone} onChange={(e) => setPhone(e.target.value)} /></Field>
-        </div>
-        <Field label="ID / Card Number (optional)"><input style={inputStyle} value={idCard} onChange={(e) => setIdCard(e.target.value)} /></Field>
+        <Field label="Their ID number"><input style={inputStyle} value={idCard} onChange={(e) => setIdCard(e.target.value)} /></Field>
         <Field label="Remarks (optional)"><input style={inputStyle} value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="e.g. flight / manifest number" /></Field>
         <BackdateDateTime label="Arrived earlier? Set the real date & time" active={backdate} setActive={setBackdate}
           date={bdDate} setDate={setBdDate} time={bdTime} setTime={setBdTime} error={bdError} setError={setBdError} />
@@ -3987,12 +4126,11 @@ function ManifestScanModal({ existing, onClose, onSave }) {
   );
 }
 
-function ShipmentReceiveForm({ existing, onClose, onSave }) {
-  const [awb, setAwb] = useState("");
+function ShipmentReceiveForm({ existing, custom, onClose, onSave }) {
   const [arrival, setArrival] = useState("");
+  const [awb, setAwb] = useState("");
+  const [origin, setOrigin] = useState("");
   const [name, setName] = useState("");
-  const [company, setCompany] = useState("");
-  const [phone, setPhone] = useState("");
   const [idCard, setIdCard] = useState("");
   const [remarks, setRemarks] = useState("");
   const [backdate, setBackdate] = useState(false);
@@ -4002,41 +4140,37 @@ function ShipmentReceiveForm({ existing, onClose, onSave }) {
   const [err, setErr] = useState("");
 
   const save = () => {
-    const awbClean = awb.trim().toUpperCase();
-    if (!awbClean || !name.trim()) return;
-    if (existing.some((s) => s.awb === awbClean && s.status === "IN_WAREHOUSE")) { setErr("This AWB is already in the warehouse — release it first or check the number."); return; }
+    const arr = arrival.trim().toUpperCase(), aw = awb.trim().toUpperCase();
+    const key = arr || aw;
+    if (!key || !name.trim()) return;
+    if (existing.some((s) => s.status === "IN_WAREHOUSE" && shipKey(s) === key)) { setErr("This one is already in the warehouse — release it first or check the number."); return; }
     if (backdate && new Date(`${bdDate}T${bdTime}:00`).getTime() > Date.now() + 60000) { setBdError("That date/time is in the future"); return; }
     onSave({
-      awb: awbClean, arrival_no: arrival.trim(), brought_by_name: name.trim(), brought_by_company: company.trim(), brought_by_phone: phone.trim(),
-      brought_by_id: idCard.trim(), remarks_in: remarks.trim(),
-      backdateDate: backdate ? bdDate : null, backdateTime: backdate ? bdTime : null,
+      arrival_no: arr, awb: aw, origin: origin.trim().toUpperCase(), brought_by_name: name.trim(), brought_by_id: idCard.trim(),
+      remarks_in: remarks.trim(), backdateDate: backdate ? bdDate : null, backdateTime: backdate ? bdTime : null,
     });
   };
 
   return (
     <Modal title="Receive Shipment" onClose={onClose}>
-      <Field label="AWB Number"><input autoFocus style={{ ...inputStyle, fontFamily: FONT_MONO }} value={awb} onChange={(e) => { setAwb(e.target.value); setErr(""); }} placeholder="e.g. 176-48201935" autoCapitalize="characters" /></Field>
+      <Field label="Arrival Number"><input autoFocus style={{ ...inputStyle, fontFamily: FONT_MONO }} value={arrival} onChange={(e) => { setArrival(e.target.value); setErr(""); }} placeholder="e.g. 1042215" autoCapitalize="characters" /></Field>
       {err && <div style={{ fontSize: 12.5, color: C.redDeep, marginTop: -6, marginBottom: 10 }}>{err}</div>}
-      <Field label="Arrival / Manifest Number (optional)"><input style={inputStyle} value={arrival} onChange={(e) => setArrival(e.target.value)} /></Field>
+      <Field label="AWB Number (optional)"><input style={{ ...inputStyle, fontFamily: FONT_MONO }} value={awb} onChange={(e) => { setAwb(e.target.value); setErr(""); }} placeholder="e.g. 176-48201935" autoCapitalize="characters" /></Field>
+      <OriginField value={origin} onChange={setOrigin} custom={custom} />
       <Field label="Brought By (person's name)"><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        <Field label="Company / Courier"><input style={inputStyle} value={company} onChange={(e) => setCompany(e.target.value)} /></Field>
-        <Field label="Phone (optional)"><input style={inputStyle} value={phone} onChange={(e) => setPhone(e.target.value)} /></Field>
-      </div>
-      <Field label="ID / Card Number (optional)"><input style={inputStyle} value={idCard} onChange={(e) => setIdCard(e.target.value)} placeholder="whatever ID the gate records, if any" /></Field>
+      <Field label="Their ID Number"><input style={inputStyle} value={idCard} onChange={(e) => setIdCard(e.target.value)} /></Field>
       <Field label="Remarks (optional)"><input style={inputStyle} value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="e.g. 2 cartons, fragile" /></Field>
       <BackdateDateTime label="Arrived earlier? Set the real date & time" active={backdate} setActive={setBackdate}
         date={bdDate} setDate={setBdDate} time={bdTime} setTime={setBdTime} error={bdError} setError={setBdError} />
-      <Btn full tone="green" icon={DoorOpen} onClick={save} disabled={!awb.trim() || !name.trim()}>Receive into Warehouse</Btn>
+      <Btn full tone="green" icon={DoorOpen} onClick={save} disabled={!(arrival.trim() || awb.trim()) || !name.trim()}>Receive into Warehouse</Btn>
     </Modal>
   );
 }
 
 function ShipmentReleaseForm({ shipment, onClose, onSave }) {
   const [name, setName] = useState("");
-  const [company, setCompany] = useState("");
-  const [phone, setPhone] = useState("");
-  const [idCard, setIdCard] = useState("");
+  const [staffNo, setStaffNo] = useState("");
+  const [destination, setDestination] = useState("");
   const [remarks, setRemarks] = useState("");
   const [backdate, setBackdate] = useState(false);
   const [bdDate, setBdDate] = useState(todayStr());
@@ -4051,8 +4185,7 @@ function ShipmentReleaseForm({ shipment, onClose, onSave }) {
       if (chosen <= new Date(`${shipment.date_in}T${shipment.time_in}`).getTime()) { setBdError(`Must be after it was received (${fmtDate(shipment.date_in)} ${fmtTime(shipment.time_in)})`); return; }
     }
     onSave({
-      taken_by_name: name.trim(), taken_by_company: company.trim(), taken_by_phone: phone.trim(),
-      taken_by_id: idCard.trim(), remarks_out: remarks.trim(),
+      taken_by_name: name.trim(), taken_by_id: staffNo.trim(), destination: destination.trim(), remarks_out: remarks.trim(),
       backdateDate: backdate ? bdDate : null, backdateTime: backdate ? bdTime : null,
     });
   };
@@ -4060,15 +4193,12 @@ function ShipmentReleaseForm({ shipment, onClose, onSave }) {
   return (
     <Modal title="Release Shipment" onClose={onClose}>
       <div style={{ background: C.paperDim, borderRadius: 8, padding: "10px 12px", marginBottom: 14 }}>
-        <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15 }}>{shipment.awb}</div>
+        <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15 }}>{shipRef(shipment)}</div>
         <div style={{ fontSize: 12, color: C.ink50 }}>In warehouse for {fmtAgeMs(shipmentAgeMs(shipment))} · received {fmtDate(shipment.date_in)} {fmtTime(shipment.time_in)}</div>
       </div>
-      <Field label="Taken By (person's name)"><input autoFocus style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></Field>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        <Field label="Company / Courier"><input style={inputStyle} value={company} onChange={(e) => setCompany(e.target.value)} /></Field>
-        <Field label="Phone (optional)"><input style={inputStyle} value={phone} onChange={(e) => setPhone(e.target.value)} /></Field>
-      </div>
-      <Field label="ID / Card Number (optional)"><input style={inputStyle} value={idCard} onChange={(e) => setIdCard(e.target.value)} placeholder="whatever ID the gate records, if any" /></Field>
+      <Field label="Taken By (staff member's name)"><input autoFocus style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></Field>
+      <Field label="Staff Number (company ID)"><input style={inputStyle} value={staffNo} onChange={(e) => setStaffNo(e.target.value)} /></Field>
+      <Field label="Taken To / Destination"><input style={inputStyle} value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="e.g. Abu Dhabi, Dubai" /></Field>
       <Field label="Remarks (optional)"><input style={inputStyle} value={remarks} onChange={(e) => setRemarks(e.target.value)} /></Field>
       <BackdateDateTime label="Already left? Set the real date & time" active={backdate} setActive={setBackdate}
         date={bdDate} setDate={setBdDate} time={bdTime} setTime={setBdTime} error={bdError} setError={setBdError} />
@@ -4099,6 +4229,53 @@ function ShipmentThresholdModal({ settings, persistSettings, notify, onClose }) 
       </div>
       <Field label="Days (or type your own)"><input type="number" min="1" style={inputStyle} value={days} onChange={(e) => setDays(e.target.value)} /></Field>
       <Btn full tone="navy" onClick={save}>Save</Btn>
+    </Modal>
+  );
+}
+
+function ShipmentOriginCodesModal({ settings, persistSettings, notify, onClose }) {
+  const custom = settings.origin_custom || {};
+  const [code, setCode] = useState("");
+  const [nm, setNm] = useState("");
+  const [lookup, setLookup] = useState("");
+  const entries = Object.entries(custom).sort((a, b) => a[0].localeCompare(b[0]));
+  const add = async () => {
+    const c = code.trim().toUpperCase();
+    if (!c || !nm.trim()) return;
+    await persistSettings({ ...settings, origin_custom: { ...custom, [c]: nm.trim() } });
+    notify(`${c} saved`);
+    setCode(""); setNm("");
+  };
+  const remove = async (c) => {
+    const next = { ...custom }; delete next[c];
+    await persistSettings({ ...settings, origin_custom: next });
+  };
+  const found = lookup.trim() ? originLabel(lookup, custom) : "";
+  return (
+    <Modal title="Origin Short Codes" onClose={onClose} wide>
+      <p style={{ fontSize: 12.5, color: C.ink50, marginTop: 0, lineHeight: 1.5 }}>About {Object.keys(ORIGIN_NAMES).length} common airport/city codes are built in (AUH = Abu Dhabi, LON = London, DXB = Dubai…). Add your own for any code that isn't recognised — yours take priority.</p>
+      <Field label="Check a code"><input style={{ ...inputStyle, fontFamily: FONT_MONO, textTransform: "uppercase" }} value={lookup} onChange={(e) => setLookup(e.target.value.toUpperCase())} maxLength={4} placeholder="AUH" /></Field>
+      {lookup.trim() && <div style={{ fontSize: 13, marginTop: -6, marginBottom: 12, color: originName(lookup, custom) ? C.greenDeep : C.amberDeep }}>{originName(lookup, custom) ? found : `${lookup.trim()} — not in the list`}</div>}
+      <div style={{ borderTop: `1px dashed ${C.line}`, paddingTop: 12, marginBottom: 12 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>Add / change a code</div>
+        <div style={{ display: "grid", gridTemplateColumns: "90px 1fr", gap: 8 }}>
+          <input style={{ ...inputStyle, fontFamily: FONT_MONO, textTransform: "uppercase" }} value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} maxLength={4} placeholder="Code" />
+          <input style={inputStyle} value={nm} onChange={(e) => setNm(e.target.value)} placeholder="City, Country" />
+        </div>
+        <div style={{ height: 8 }} />
+        <Btn size="sm" tone="navy" onClick={add} disabled={!code.trim() || !nm.trim()}>Save Code</Btn>
+      </div>
+      {entries.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Your custom codes</div>
+          {entries.map(([c, n]) => (
+            <div key={c} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.paperDim, borderRadius: 7, padding: "7px 10px", marginBottom: 5 }}>
+              <span style={{ fontSize: 13 }}><b style={{ fontFamily: FONT_MONO }}>{c}</b> — {n}</span>
+              <button type="button" onClick={() => remove(c)} style={{ background: "none", border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 8px", fontSize: 11, cursor: "pointer" }}>Remove</button>
+            </div>
+          ))}
+        </div>
+      )}
     </Modal>
   );
 }
@@ -4613,22 +4790,24 @@ function EmployeeReport({ employees, attendance, settings }) {
 function UserEditForm({ user, onClose, onSave }) {
   const [name, setName] = useState(user.name);
   const [username, setUsername] = useState(user.username);
+  const [group, setGroup] = useState(user.group || "");
   const [newPassword, setNewPassword] = useState("");
 
   return (
     <Modal title="Edit Account" onClose={onClose}>
       <Field label="Full name"><input autoFocus style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></Field>
       <Field label="Username"><input style={inputStyle} value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" autoCorrect="off" /></Field>
+      <Field label="Group / Chamber (shown on the login page)"><input style={inputStyle} value={group} onChange={(e) => setGroup(e.target.value)} placeholder={userGroup(user)} /></Field>
       <Field label="New password (leave blank to keep current)"><input type="password" style={inputStyle} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="••••••••" /></Field>
       <div style={{ fontSize: 11.5, color: C.ink50, marginBottom: 14 }}>Role: {user.role === "admin" ? "Manager / Admin" : "Security Guard"} (role can't be changed here — disable the account and create a new one to change role)</div>
-      <Btn full tone="navy" onClick={() => onSave({ name, username, newPassword })} disabled={!name.trim() || !username.trim()}>Save Changes</Btn>
+      <Btn full tone="navy" onClick={() => onSave({ name, username, group, newPassword })} disabled={!name.trim() || !username.trim()}>Save Changes</Btn>
     </Modal>
   );
 }
 
 function SettingsScreen({ settings, persistSettings, users, persistUsers, notify, loadSample, eraseAll, busy, sendReport, syncMode, canWriteShared, firebaseError }) {
   const [shiftHours, setShiftHours] = useState(settings.shift_hours || 9);
-  const [newUser, setNewUser] = useState({ name: "", username: "", password: "", role: "guard" });
+  const [newUser, setNewUser] = useState({ name: "", username: "", password: "", role: "guard", group: "" });
   const [confirmSample, setConfirmSample] = useState(false);
   const [confirmErase, setConfirmErase] = useState(false);
   const channels0 = settings.report_channels || { attendance: defaultChannel(), security: defaultChannel(), inventory: defaultChannel(), shipments: defaultChannel() };
@@ -4685,8 +4864,8 @@ function SettingsScreen({ settings, persistSettings, users, persistUsers, notify
       notify("That username already exists", "error"); return;
     }
     const hash = await sha256(newUser.password);
-    await persistUsers([{ id: uid("u_"), name: newUser.name, username: newUser.username, passwordHash: hash, role: newUser.role, active: true, created_at: Date.now() }, ...users]);
-    setNewUser({ name: "", username: "", password: "", role: "guard" });
+    await persistUsers([{ id: uid("u_"), name: newUser.name, username: newUser.username, passwordHash: hash, role: newUser.role, group: (newUser.group || "").trim(), active: true, created_at: Date.now() }, ...users]);
+    setNewUser({ name: "", username: "", password: "", role: "guard", group: "" });
     notify("Account created");
   };
 
@@ -4699,7 +4878,7 @@ function SettingsScreen({ settings, persistSettings, users, persistUsers, notify
     if (!data.name.trim() || !data.username.trim()) { notify("Name and username are required", "error"); return; }
     const dupe = users.some((u) => u.id !== editingUser.id && u.username.trim().toLowerCase() === data.username.trim().toLowerCase());
     if (dupe) { notify("That username is already taken", "error"); return; }
-    let patch = { name: data.name.trim(), username: data.username.trim() };
+    let patch = { name: data.name.trim(), username: data.username.trim(), group: (data.group || "").trim() };
     if (data.newPassword) {
       if (data.newPassword.length < 4) { notify("New password must be at least 4 characters", "error"); return; }
       patch.passwordHash = await sha256(data.newPassword);
@@ -4875,7 +5054,7 @@ function SettingsScreen({ settings, persistSettings, users, persistUsers, notify
             <div key={u.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: C.paperDim, borderRadius: 7 }}>
               <div>
                 <span style={{ fontWeight: 600, fontSize: 13.5 }}>{u.name}</span>
-                <span style={{ fontFamily: FONT_MONO, fontSize: 11.5, color: C.ink50, marginLeft: 8 }}>{u.username} · {u.role}</span>
+                <span style={{ fontFamily: FONT_MONO, fontSize: 11.5, color: C.ink50, marginLeft: 8 }}>{u.username} · {u.role} · {userGroup(u)}</span>
                 {!u.active && <span style={{ marginLeft: 8 }}><Badge tone="missing">DISABLED</Badge></span>}
               </div>
               <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
@@ -4891,6 +5070,7 @@ function SettingsScreen({ settings, persistSettings, users, persistUsers, notify
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Full name"><input style={inputStyle} value={newUser.name} onChange={(e) => setNewUser((n) => ({ ...n, name: e.target.value }))} /></Field>
           <Field label="Username"><input style={inputStyle} value={newUser.username} onChange={(e) => setNewUser((n) => ({ ...n, username: e.target.value }))} /></Field>
+          <Field label="Group / Chamber (login page)"><input style={inputStyle} value={newUser.group} onChange={(e) => setNewUser((n) => ({ ...n, group: e.target.value }))} placeholder="e.g. Chamber 107" /></Field>
           <Field label="Password"><input type="password" style={inputStyle} value={newUser.password} onChange={(e) => setNewUser((n) => ({ ...n, password: e.target.value }))} /></Field>
           <Field label="Role">
             <select style={inputStyle} value={newUser.role} onChange={(e) => setNewUser((n) => ({ ...n, role: e.target.value }))}>
