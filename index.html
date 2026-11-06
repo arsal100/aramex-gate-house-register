@@ -168,6 +168,20 @@ function minutesBetween(dateStr, timeIn, timeOut) {
   if (diff < 0) diff += 1440;
   return diff;
 }
+function attStartMs(a) { return new Date(`${a.date}T${a.time_in}`).getTime(); }
+function attEndMs(a) {
+  if (a.status === "INSIDE" || !a.time_out) return Date.now();
+  let e = new Date(`${a.date_out || a.date}T${a.time_out}`).getTime();
+  if (!a.date_out && a.time_out < a.time_in) e += 86400000; // older overnight records had no date_out
+  return e;
+}
+function overlapsExisting(attendance, employeeId, startMs, endMs, ignoreId) {
+  return attendance.some((a) => a.employee_id === employeeId && a.id !== ignoreId && startMs < attEndMs(a) && endMs > attStartMs(a));
+}
+function fmtTimeOut(a) {
+  if (!a.time_out) return "—";
+  return a.date_out && a.date_out !== a.date ? `${fmtTime(a.time_out)} (${dayLabelFor(a.date_out)})` : fmtTime(a.time_out);
+}
 function fmtDuration(mins) {
   if (mins == null) return "—";
   const h = Math.floor(mins / 60), m = mins % 60;
@@ -273,7 +287,7 @@ function buildReportPayload(freq, employees, attendance, empById, settings) {
 
   const csvHeaders = [
     { label: "Date", get: (r) => r.date }, { label: "Employee", get: (r) => r.emp.name }, { label: "Employee ID", get: (r) => r.emp.employee_number },
-    { label: "Company", get: (r) => r.emp.company }, { label: "Time In", get: (r) => r.time_in }, { label: "Time Out", get: (r) => r.time_out || "" },
+    { label: "Company", get: (r) => r.emp.company }, { label: "Time In", get: (r) => r.time_in }, { label: "Date Out", get: (r) => (r.time_out ? (r.date_out || r.date) : "") }, { label: "Time Out", get: (r) => r.time_out || "" },
     { label: "Total Hours", get: (r) => r.total_minutes != null ? fmtDuration(r.total_minutes) : "" }, { label: "Overtime", get: (r) => fmtDuration(overtimeMinutes(r.total_minutes, shiftHours)) },
     { label: "Status", get: (r) => r.status }, { label: "Recorded By", get: (r) => r.status === "INSIDE" ? r.checked_in_by : r.checked_out_by },
   ];
@@ -304,7 +318,7 @@ function buildSecurityReportPayload(freq, visitors) {
     { label: "Date", get: (r) => r.date }, { label: "Type", get: (r) => r.type }, { label: "Name", get: (r) => r.name },
     { label: "Company", get: (r) => r.company || "" }, { label: "Phone", get: (r) => r.phone || "" }, { label: "Purpose", get: (r) => r.purpose || "" },
     { label: "Department", get: (r) => r.department || "" }, { label: "Host", get: (r) => r.host_name || "" }, { label: "Pass Number", get: (r) => r.pass_number || "" },
-    { label: "ID Collected", get: (r) => r.id_collected ? "Yes" : "No" }, { label: "Time In", get: (r) => r.time_in }, { label: "Time Out", get: (r) => r.time_out || "" },
+    { label: "ID Collected", get: (r) => r.id_collected ? "Yes" : "No" }, { label: "Time In", get: (r) => r.time_in }, { label: "Date Out", get: (r) => (r.time_out ? (r.date_out || r.date) : "") }, { label: "Time Out", get: (r) => r.time_out || "" },
     { label: "Status", get: (r) => r.status }, { label: "Checked In By", get: (r) => r.checked_in_by }, { label: "Checked Out By", get: (r) => r.checked_out_by || "" },
   ];
   return { subject, body: lines.join("\n"), csv: toCSV(rows, csvHeaders), filename: `security-${freq}-report-${from}_${to}.csv`, label, rowCount: rows.length };
@@ -1635,6 +1649,7 @@ function Dashboard({ session, employees, attendance, settings, empById, today, g
   const todays = attendance.filter((a) => a.date === today);
   const inside = todays.filter((a) => a.status === "INSIDE");
   const checkedOutToday = todays.filter((a) => a.status === "CHECKED_OUT");
+  const staleInside = attendance.filter((a) => a.status === "INSIDE" && a.date < today);
   const activeEmployees = employees.filter((e) => e.active);
   const checkedInIds = new Set(todays.map((a) => a.employee_id));
   const onLeaveToday = activeEmployees.filter((e) => findLeave(leaves, e.id, today));
@@ -1684,6 +1699,19 @@ function Dashboard({ session, employees, attendance, settings, empById, today, g
           </div>
         </div>
       </div>
+
+      {staleInside.length > 0 && (
+        <div style={{ background: "#FEF3C7", border: `1px solid #FDE68A`, borderRadius: 10, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <Clock size={18} color={C.amberDeep} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13.5, color: C.ink }}>{staleInside.length} still checked in from earlier days</div>
+              <div style={{ fontSize: 12, color: C.ink50 }}>{staleInside.slice(0, 4).map((a) => (empById[a.employee_id] ? empById[a.employee_id].name : "—") + " (" + dayLabelFor(a.date) + ")").join(", ")}{staleInside.length > 4 ? "…" : ""} — check them out with the real date &amp; time</div>
+            </div>
+          </div>
+          <Btn size="sm" tone="amber" onClick={() => goto("checkout")}>Check Them Out</Btn>
+        </div>
+      )}
 
       {(handoverRecords || []).some((r) => r.status === "PENDING") && (
         <div style={{ background: "#FEF3C7", border: `1px solid #FDE68A`, borderRadius: 10, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
@@ -1798,7 +1826,7 @@ function Dashboard({ session, employees, attendance, settings, empById, today, g
                 <tr key={a.id}>
                   <Td>{e.name}</Td>
                   <TdMono>{fmtTime(a.time_in)}</TdMono>
-                  <TdMono>{a.time_out ? fmtTime(a.time_out) : "—"}</TdMono>
+                  <TdMono>{fmtTimeOut(a)}</TdMono>
                   <Td>{a.total_minutes != null ? fmtDuration(a.total_minutes) : "—"}</Td>
                   <Td><StatusBadge a={a} shiftHours={settings.shift_hours} /></Td>
                   <Td>{a.status === "INSIDE" ? a.checked_in_by : a.checked_out_by}</Td>
@@ -1918,37 +1946,53 @@ function CheckInScreen({ session, employees, attendance, settings, leaves, persi
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(null);
   const [backdate, setBackdate] = useState(false);
-  const [customTime, setCustomTime] = useState(nowTimeStr().slice(0, 5));
+  const [bdDate, setBdDate] = useState(todayStr());
+  const [bdTime, setBdTime] = useState(nowTimeStr().slice(0, 5));
+  const [bdError, setBdError] = useState("");
+  const [alsoOut, setAlsoOut] = useState(false);
+  const [outDate, setOutDate] = useState(todayStr());
+  const [outTime, setOutTime] = useState("");
 
   const insideIds = useMemo(() => new Set(attendance.filter((a) => a.status === "INSIDE").map((a) => a.employee_id)), [attendance]);
   const alreadyInside = selected && insideIds.has(selected.id);
   const onLeave = selected && findLeave(leaves, selected.id, today);
 
-  const pickEmployee = (e) => { setSelected(e); setBackdate(false); setCustomTime(nowTimeStr().slice(0, 5)); };
+  const pickEmployee = (e) => { setSelected(e); setBackdate(false); setBdDate(todayStr()); setBdTime(nowTimeStr().slice(0, 5)); setBdError(""); setAlsoOut(false); setOutDate(todayStr()); setOutTime(""); };
 
   const doCheckIn = async () => {
     if (!selected || submitting) return;
     if (!selected.active) { notify("This employee is inactive and cannot be checked in", "error"); return; }
-    if (insideIds.has(selected.id)) { notify("Already inside — check out first", "error"); return; }
     const now = new Date();
-    let time_in = nowTimeStr(now);
+    let date = todayStr(now), time_in = nowTimeStr(now), date_out = null, time_out = null, total_minutes = null, status = "INSIDE";
     if (backdate) {
-      if (!customTime) { notify("Enter a valid time", "error"); return; }
-      if (`${customTime}:00` > nowTimeStr(now)) { notify("Check-in time can't be in the future", "error"); return; }
-      time_in = `${customTime}:00`;
-    }
+      if (!bdDate || !bdTime) { setBdError("Pick the check-in date and time"); return; }
+      const inMs = new Date(`${bdDate}T${bdTime}:00`).getTime();
+      if (inMs > now.getTime() + 60000) { setBdError("Check-in can't be in the future"); return; }
+      date = bdDate; time_in = `${bdTime}:00`;
+      if (alsoOut) {
+        if (!outDate || !outTime) { setBdError("Pick the check-out date and time"); return; }
+        const outMs = new Date(`${outDate}T${outTime}:00`).getTime();
+        if (outMs > now.getTime() + 60000) { setBdError("Check-out can't be in the future"); return; }
+        if (outMs <= inMs) { setBdError("Check-out must be after check-in"); return; }
+        if (overlapsExisting(attendance, selected.id, inMs, outMs)) { setBdError("That overlaps another attendance record for this person"); return; }
+        date_out = outDate; time_out = `${outTime}:00`; status = "CHECKED_OUT"; total_minutes = Math.round((outMs - inMs) / 60000);
+      } else {
+        if (insideIds.has(selected.id)) { notify("Already inside — check out first", "error"); return; }
+        if (overlapsExisting(attendance, selected.id, inMs, Date.now() + 1)) { setBdError("That time overlaps another record for this person — also record their check-out, or pick a later time"); return; }
+      }
+    } else if (insideIds.has(selected.id)) { notify("Already inside — check out first", "error"); return; }
     setSubmitting(true);
     const record = {
-      id: uid("a_"), employee_id: selected.id, date: todayStr(now), time_in, time_out: null, total_minutes: null,
-      status: "INSIDE", checked_in_by: session.name, checked_out_by: null,
+      id: uid("a_"), employee_id: selected.id, date, time_in, date_out, time_out, total_minutes,
+      status, checked_in_by: session.name, checked_out_by: status === "CHECKED_OUT" ? session.name : null,
       remarks_in: remarks || "", remarks_out: "",
       created_at: Date.now(), updated_at: Date.now(),
     };
     await persistAttendance([record, ...attendance]);
-    await persistAudit([{ id: uid("log_"), attendance_id: record.id, action: "CHECK_IN", old_value: null, new_value: `IN ${time_in}`, performed_by: session.name, reason: "", timestamp: Date.now() }, ...audit]);
+    await persistAudit([{ id: uid("log_"), attendance_id: record.id, action: "CHECK_IN", old_value: null, new_value: `IN ${date} ${time_in}${time_out ? ` / OUT ${date_out} ${time_out}` : ""}`, performed_by: session.name, reason: backdate ? "Backdated entry" : "", timestamp: Date.now() }, ...audit]);
     setSubmitting(false);
     setSuccess({ ...record, employee: selected });
-    setSelected(null); setRemarks(""); setBackdate(false);
+    setSelected(null); setRemarks(""); setBackdate(false); setAlsoOut(false);
     notify(`${selected.name} checked in`);
   };
 
@@ -2011,15 +2055,31 @@ function CheckInScreen({ session, employees, attendance, settings, leaves, persi
             )}
           </div>
 
-          <BackdateField label="Arrived earlier? Set actual check-in time" active={backdate}
-            onToggle={() => { setBackdate((b) => !b); setCustomTime(nowTimeStr().slice(0, 5)); }}
-            time={customTime} onTimeChange={setCustomTime} />
+          <BackdateDateTime label="Arrived earlier or on a previous date? Set the real check-in date & time" active={backdate} setActive={setBackdate}
+            date={bdDate} setDate={setBdDate} time={bdTime} setTime={setBdTime} error={bdError} setError={setBdError} />
+          {backdate && (
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: alsoOut ? 8 : 0 }}>
+                <input type="checkbox" checked={alsoOut} onChange={(e) => { setAlsoOut(e.target.checked); setBdError(""); if (e.target.checked) setOutDate(bdDate); }} />
+                <span style={{ fontSize: 13 }}>They have already left — also record the check-out</span>
+              </label>
+              {alsoOut && (
+                <div style={{ background: "#FCEFE0", border: `1px solid #F2D6A6`, borderRadius: 9, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.amberDeep, letterSpacing: 0.3, marginBottom: 8 }}>CHECK-OUT DATE &amp; TIME</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <input type="date" style={{ ...inputStyle, background: "#fff" }} value={outDate} max={todayStr()} onChange={(e) => { setOutDate(e.target.value); setBdError(""); }} />
+                    <input type="time" style={{ ...inputStyle, background: "#fff" }} value={outTime} onChange={(e) => { setOutTime(e.target.value); setBdError(""); }} />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           <Field label="Remarks (optional)">
             <RemarksPicker value={remarks} onChange={setRemarks} />
           </Field>
 
-          <Btn full tone="green" size="lg" icon={DoorOpen} onClick={doCheckIn} disabled={submitting || alreadyInside || !selected.active}>
+          <Btn full tone="green" size="lg" icon={DoorOpen} onClick={doCheckIn} disabled={submitting || (alreadyInside && !(backdate && alsoOut)) || !selected.active}>
             {submitting ? "Recording…" : "CHECK IN"}
           </Btn>
         </div>
@@ -2100,30 +2160,35 @@ function CheckOutScreen({ session, employees, attendance, settings, persistAtten
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(null);
   const [backdate, setBackdate] = useState(false);
-  const [customTime, setCustomTime] = useState(nowTimeStr().slice(0, 5));
+  const [bdDate, setBdDate] = useState(todayStr());
+  const [bdTime, setBdTime] = useState(nowTimeStr().slice(0, 5));
+  const [bdError, setBdError] = useState("");
 
   const insideRecords = useMemo(() => attendance.filter((a) => a.status === "INSIDE"), [attendance]);
   const insideIds = useMemo(() => new Set(insideRecords.map((a) => a.employee_id)), [insideRecords]);
   const activeRecord = selected ? insideRecords.find((a) => a.employee_id === selected.id) : null;
 
-  const pickEmployee = (e) => { setSelected(e); setBackdate(false); setCustomTime(nowTimeStr().slice(0, 5)); };
+  const pickEmployee = (e) => { setSelected(e); setBackdate(false); setBdDate(todayStr()); setBdTime(nowTimeStr().slice(0, 5)); setBdError(""); };
 
   const doCheckOut = async () => {
     if (!activeRecord || submitting) return;
     const now = new Date();
-    let time_out = nowTimeStr(now);
+    let date_out = todayStr(now), time_out = nowTimeStr(now);
+    const inMs = attStartMs(activeRecord);
     if (backdate) {
-      if (!customTime) { notify("Enter a valid time", "error"); return; }
-      if (`${customTime}:00` > nowTimeStr(now)) { notify("Check-out time can't be in the future", "error"); return; }
-      if (`${customTime}:00` <= activeRecord.time_in) { notify(`Check-out time must be after the check-in time (${fmtTime(activeRecord.time_in)})`, "error"); return; }
-      time_out = `${customTime}:00`;
+      if (!bdDate || !bdTime) { setBdError("Pick the check-out date and time"); return; }
+      const outMs = new Date(`${bdDate}T${bdTime}:00`).getTime();
+      if (outMs > now.getTime() + 60000) { setBdError("Check-out can't be in the future"); return; }
+      if (outMs <= inMs) { setBdError(`Check-out must be after the check-in (${fmtDate(activeRecord.date)} ${fmtTime(activeRecord.time_in)})`); return; }
+      if (overlapsExisting(attendance, activeRecord.employee_id, inMs, outMs, activeRecord.id)) { setBdError("That overlaps a later attendance record for this person"); return; }
+      date_out = bdDate; time_out = `${bdTime}:00`;
     }
     setSubmitting(true);
-    const total_minutes = minutesBetween(activeRecord.date, activeRecord.time_in, time_out);
-    const updated = { ...activeRecord, time_out, total_minutes, status: "CHECKED_OUT", checked_out_by: session.name, remarks_out: remarks || "", updated_at: Date.now() };
+    const total_minutes = Math.max(0, Math.round((new Date(`${date_out}T${time_out}`).getTime() - inMs) / 60000));
+    const updated = { ...activeRecord, date_out, time_out, total_minutes, status: "CHECKED_OUT", checked_out_by: session.name, remarks_out: remarks || "", updated_at: Date.now() };
     const next = attendance.map((a) => (a.id === activeRecord.id ? updated : a));
     await persistAttendance(next);
-    await persistAudit([{ id: uid("log_"), attendance_id: activeRecord.id, action: "CHECK_OUT", old_value: null, new_value: `OUT ${time_out}`, performed_by: session.name, reason: "", timestamp: Date.now() }, ...audit]);
+    await persistAudit([{ id: uid("log_"), attendance_id: activeRecord.id, action: "CHECK_OUT", old_value: null, new_value: `OUT ${date_out} ${time_out}`, performed_by: session.name, reason: backdate ? "Backdated check-out" : "", timestamp: Date.now() }, ...audit]);
     setSubmitting(false);
     setSuccess({ ...updated, employee: selected });
     setSelected(null); setRemarks(""); setBackdate(false);
@@ -2142,8 +2207,8 @@ function CheckOutScreen({ session, employees, attendance, settings, persistAtten
           )}
           <div style={{ display: "grid", gridTemplateColumns: "auto auto", gap: "6px 18px", justifyContent: "center", marginTop: 14, textAlign: "left" }}>
             <span style={{ color: C.ink50, fontSize: 13 }}>Employee</span><span style={{ fontWeight: 600 }}>{success.employee.name}</span>
-            <span style={{ color: C.ink50, fontSize: 13 }}>Time In</span><span style={{ fontFamily: FONT_MONO }}>{fmtTime(success.time_in)}</span>
-            <span style={{ color: C.ink50, fontSize: 13 }}>Time Out</span><span style={{ fontFamily: FONT_MONO }}>{fmtTime(success.time_out)}</span>
+            <span style={{ color: C.ink50, fontSize: 13 }}>Time In</span><span style={{ fontFamily: FONT_MONO }}>{fmtDate(success.date)} {fmtTime(success.time_in)}</span>
+            <span style={{ color: C.ink50, fontSize: 13 }}>Time Out</span><span style={{ fontFamily: FONT_MONO }}>{fmtDate(success.date_out || success.date)} {fmtTime(success.time_out)}</span>
             <span style={{ color: C.ink50, fontSize: 13 }}>Total Time Inside</span><span style={{ fontWeight: 600 }}>{fmtDuration(success.total_minutes)}</span>
           </div>
           <div style={{ marginTop: 20 }}>
@@ -2182,9 +2247,14 @@ function CheckOutScreen({ session, employees, attendance, settings, persistAtten
             </div>
           </div>
 
-          <BackdateField label="Already left? Set actual check-out time" active={backdate}
-            onToggle={() => { setBackdate((b) => !b); setCustomTime(nowTimeStr().slice(0, 5)); }}
-            time={customTime} onTimeChange={setCustomTime} />
+          {activeRecord.date < todayStr() && !backdate && (
+            <div style={{ background: "#FEF3C7", border: `1px solid #FDE68A`, borderRadius: 8, padding: "9px 11px", fontSize: 12.5, color: C.amberDeep, marginBottom: 12, lineHeight: 1.5 }}>
+              This check-in is from <b>{fmtDate(activeRecord.date)}</b> — they were probably never checked out. If they actually left earlier, set the real check-out date &amp; time below.
+            </div>
+          )}
+          <BackdateDateTime label="Already left? Set the real check-out date & time (can be a previous date)" active={backdate}
+            setActive={(v) => { setBackdate(v); if (v) { setBdDate(activeRecord.date < todayStr() ? activeRecord.date : todayStr()); setBdError(""); } }}
+            date={bdDate} setDate={setBdDate} time={bdTime} setTime={setBdTime} error={bdError} setError={setBdError} />
 
           <Field label="Remarks (optional)">
             <RemarksPicker value={remarks} onChange={setRemarks} />
@@ -2245,7 +2315,7 @@ function AttendanceToday({ employees, attendance, empById, today, settings, leav
                     <Td>{e.name}</Td>
                     <TdMono>{e.employee_number}</TdMono>
                     <TdMono>{fmtTime(a.time_in)}</TdMono>
-                    <TdMono>{a.time_out ? fmtTime(a.time_out) : "—"}</TdMono>
+                    <TdMono>{fmtTimeOut(a)}</TdMono>
                     <Td>{a.total_minutes != null ? fmtDuration(a.total_minutes) : "—"}</Td>
                     <Td><StatusBadge a={a} shiftHours={settings.shift_hours} /></Td>
                     <Td>{a.status === "INSIDE" ? a.checked_in_by : a.checked_out_by}</Td>
@@ -2308,7 +2378,7 @@ function HistoryScreen({ employees, attendance, empById, session, persistAttenda
       { label: "Date", get: (r) => r.date }, { label: "Employee", get: (r) => r.emp.name },
       { label: "Employee ID", get: (r) => r.emp.employee_number }, { label: "Company", get: (r) => r.emp.company },
       { label: "Department", get: (r) => r.emp.department }, { label: "Time In", get: (r) => r.time_in },
-      { label: "Time Out", get: (r) => r.time_out || "" }, { label: "Total Hours", get: (r) => r.total_minutes != null ? fmtDuration(r.total_minutes) : "" },
+      { label: "Date Out", get: (r) => (r.time_out ? (r.date_out || r.date) : "") }, { label: "Time Out", get: (r) => r.time_out || "" }, { label: "Total Hours", get: (r) => r.total_minutes != null ? fmtDuration(r.total_minutes) : "" },
       { label: "Overtime", get: (r) => fmtDuration(overtimeMinutes(r.total_minutes, shiftHours)) },
       { label: "Status", get: (r) => r.status }, { label: "Recorded By", get: (r) => r.status === "INSIDE" ? r.checked_in_by : r.checked_out_by },
       { label: "Remarks", get: (r) => [r.remarks_in, r.remarks_out].filter(Boolean).join(" / ") },
@@ -2365,7 +2435,7 @@ function HistoryScreen({ employees, attendance, empById, session, persistAttenda
             {filtered.slice(0, 200).map((r) => (
               <tr key={r.id}>
                 <Td>{r.date}</Td><Td>{r.emp.name}</Td><TdMono>{r.emp.employee_number}</TdMono><Td>{r.emp.company}</Td>
-                <TdMono>{fmtTime(r.time_in)}</TdMono><TdMono>{r.time_out ? fmtTime(r.time_out) : "—"}</TdMono>
+                <TdMono>{fmtTime(r.time_in)}</TdMono><TdMono>{fmtTimeOut(r)}</TdMono>
                 <Td>{r.total_minutes != null ? fmtDuration(r.total_minutes) : "—"}</Td>
                 <Td><StatusBadge a={r} shiftHours={settings.shift_hours} /></Td>
                 <Td>{r.status === "INSIDE" ? r.checked_in_by : r.checked_out_by}</Td>
@@ -2388,20 +2458,30 @@ function HistoryScreen({ employees, attendance, empById, session, persistAttenda
 }
 
 function CorrectionModal({ record, onClose, attendance, persistAttendance, audit, persistAudit, session, notify }) {
+  const [dateIn, setDateIn] = useState(record.date || "");
   const [timeIn, setTimeIn] = useState(record.time_in || "");
+  const [dateOut, setDateOut] = useState(record.time_out ? (record.date_out || record.date) : "");
   const [timeOut, setTimeOut] = useState(record.time_out || "");
   const [reason, setReason] = useState("");
 
   const save = async () => {
     if (!reason.trim()) { notify("A reason is required to correct a record", "error"); return; }
-    const total_minutes = timeOut ? minutesBetween(record.date, timeIn, timeOut) : null;
-    const updated = { ...record, time_in: timeIn, time_out: timeOut || null, total_minutes, status: timeOut ? "CHECKED_OUT" : "INSIDE", updated_at: Date.now() };
+    if (!dateIn || !timeIn) { notify("Check-in date and time are required", "error"); return; }
+    let total_minutes = null, date_out = null;
+    if (timeOut) {
+      const od = dateOut || dateIn;
+      const inMs = new Date(`${dateIn}T${timeIn}`).getTime(), outMs = new Date(`${od}T${timeOut}`).getTime();
+      if (outMs <= inMs) { notify("Check-out must be after check-in", "error"); return; }
+      date_out = od; total_minutes = Math.round((outMs - inMs) / 60000);
+    }
+    const updated = { ...record, date: dateIn, time_in: timeIn, date_out, time_out: timeOut || null, total_minutes, status: timeOut ? "CHECKED_OUT" : "INSIDE", updated_at: Date.now() };
     delete updated.emp;
-    const next = attendance.map((a) => (a.id === record.id ? updated : a));
-    await persistAttendance(next);
+    await persistAttendance(attendance.map((a) => (a.id === record.id ? updated : a)));
     const logs = [];
-    if (timeIn !== record.time_in) logs.push({ id: uid("log_"), attendance_id: record.id, action: "CORRECTION", old_value: `time_in=${record.time_in}`, new_value: `time_in=${timeIn}`, performed_by: session.name, reason, timestamp: Date.now() });
-    if ((timeOut || null) !== record.time_out) logs.push({ id: uid("log_"), attendance_id: record.id, action: "CORRECTION", old_value: `time_out=${record.time_out || "—"}`, new_value: `time_out=${timeOut || "—"}`, performed_by: session.name, reason, timestamp: Date.now() });
+    const oldOut = record.time_out ? `${record.date_out || record.date} ${record.time_out}` : "—";
+    const newOut = timeOut ? `${date_out} ${timeOut}` : "—";
+    if (dateIn !== record.date || timeIn !== record.time_in) logs.push({ id: uid("log_"), attendance_id: record.id, action: "CORRECTION", old_value: `in=${record.date} ${record.time_in}`, new_value: `in=${dateIn} ${timeIn}`, performed_by: session.name, reason, timestamp: Date.now() });
+    if (oldOut !== newOut) logs.push({ id: uid("log_"), attendance_id: record.id, action: "CORRECTION", old_value: `out=${oldOut}`, new_value: `out=${newOut}`, performed_by: session.name, reason, timestamp: Date.now() });
     if (logs.length) await persistAudit([...logs, ...audit]);
     notify("Attendance record corrected");
     onClose();
@@ -2409,12 +2489,17 @@ function CorrectionModal({ record, onClose, attendance, persistAttendance, audit
 
   return (
     <Modal title="Correct Attendance Record" onClose={onClose}>
-      <div style={{ fontSize: 13, color: C.ink50, marginBottom: 12 }}>{record.emp?.name} · {record.date}</div>
-      <Field label="Time In"><input type="time" step="1" style={inputStyle} value={timeIn} onChange={(e) => setTimeIn(e.target.value)} /></Field>
-      <Field label="Time Out (leave blank if still inside)"><input type="time" step="1" style={inputStyle} value={timeOut} onChange={(e) => setTimeOut(e.target.value)} /></Field>
+      <div style={{ fontSize: 13, color: C.ink50, marginBottom: 12 }}>{record.emp?.name}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <Field label="Check-in date"><input type="date" style={inputStyle} value={dateIn} max={todayStr()} onChange={(e) => setDateIn(e.target.value)} /></Field>
+        <Field label="Check-in time"><input type="time" step="1" style={inputStyle} value={timeIn} onChange={(e) => setTimeIn(e.target.value)} /></Field>
+        <Field label="Check-out date"><input type="date" style={inputStyle} value={dateOut} max={todayStr()} onChange={(e) => setDateOut(e.target.value)} /></Field>
+        <Field label="Check-out time"><input type="time" step="1" style={inputStyle} value={timeOut} onChange={(e) => setTimeOut(e.target.value)} /></Field>
+      </div>
+      <div style={{ fontSize: 11.5, color: C.ink50, marginTop: -4, marginBottom: 10 }}>Leave the check-out time blank if they are still inside.</div>
       <Field label="Reason for correction (required)"><textarea style={{ ...inputStyle, minHeight: 70 }} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Guard entered wrong time, correcting per CCTV footage" /></Field>
       <div style={{ background: C.paperDim, borderRadius: 8, padding: "8px 10px", fontSize: 12, color: C.ink50, marginBottom: 14 }}>
-        Original: time_in {record.time_in}, time_out {record.time_out || "—"} — this change will be logged in the audit trail, not silently overwritten.
+        Original: in {record.date} {record.time_in}, out {record.time_out ? `${record.date_out || record.date} ${record.time_out}` : "—"} — this change is logged in the audit trail, not silently overwritten.
       </div>
       <Btn full tone="navy" onClick={save}>Save Correction</Btn>
     </Modal>
@@ -4686,7 +4771,7 @@ function PeriodReport({ mode, employees, attendance, empById, settings }) {
 
   const headers = [
     { label: "Date", get: (r) => r.date }, { label: "Employee", get: (r) => r.emp.name }, { label: "Employee ID", get: (r) => r.emp.employee_number },
-    { label: "Company", get: (r) => r.emp.company }, { label: "Time In", get: (r) => r.time_in }, { label: "Time Out", get: (r) => r.time_out || "" },
+    { label: "Company", get: (r) => r.emp.company }, { label: "Time In", get: (r) => r.time_in }, { label: "Date Out", get: (r) => (r.time_out ? (r.date_out || r.date) : "") }, { label: "Time Out", get: (r) => r.time_out || "" },
     { label: "Total Hours", get: (r) => r.total_minutes != null ? fmtDuration(r.total_minutes) : "" }, { label: "Status", get: (r) => r.status },
     { label: "Overtime", get: (r) => fmtDuration(overtimeMinutes(r.total_minutes, shiftHours)) }, { label: "Recorded By", get: (r) => r.status === "INSIDE" ? r.checked_in_by : r.checked_out_by },
   ];
@@ -4718,7 +4803,7 @@ function PeriodReport({ mode, employees, attendance, empById, settings }) {
             {rows.map((r) => (
               <tr key={r.id}>
                 <Td>{r.date}</Td><Td>{r.emp.name}</Td><TdMono>{r.emp.employee_number}</TdMono>
-                <TdMono>{fmtTime(r.time_in)}</TdMono><TdMono>{r.time_out ? fmtTime(r.time_out) : "—"}</TdMono>
+                <TdMono>{fmtTime(r.time_in)}</TdMono><TdMono>{fmtTimeOut(r)}</TdMono>
                 <Td>{r.total_minutes != null ? fmtDuration(r.total_minutes) : "—"}</Td><Td><StatusBadge a={r} shiftHours={settings.shift_hours} /></Td>
               </tr>
             ))}
@@ -4742,7 +4827,7 @@ function EmployeeReport({ employees, attendance, settings }) {
   const missing = rows.filter((r) => r.status === "INSIDE" && r.date < todayStr()).length;
 
   const headers = [
-    { label: "Date", get: (r) => r.date }, { label: "Time In", get: (r) => r.time_in }, { label: "Time Out", get: (r) => r.time_out || "" },
+    { label: "Date", get: (r) => r.date }, { label: "Time In", get: (r) => r.time_in }, { label: "Date Out", get: (r) => (r.time_out ? (r.date_out || r.date) : "") }, { label: "Time Out", get: (r) => r.time_out || "" },
     { label: "Total Hours", get: (r) => r.total_minutes != null ? fmtDuration(r.total_minutes) : "" }, { label: "Status", get: (r) => r.status },
     { label: "Overtime", get: (r) => fmtDuration(overtimeMinutes(r.total_minutes, shiftHours)) },
   ];
@@ -4772,7 +4857,7 @@ function EmployeeReport({ employees, attendance, settings }) {
             {rows.length === 0 ? <EmptyState icon={ClipboardList} title="No attendance history for this employee" /> : (
               <TableScroll headers={["Date", "Time In", "Time Out", "Hours", "Status"]}>
                 {rows.slice().sort((a,b)=>b.date.localeCompare(a.date)).map((r) => (
-                  <tr key={r.id}><Td>{r.date}</Td><TdMono>{fmtTime(r.time_in)}</TdMono><TdMono>{r.time_out ? fmtTime(r.time_out) : "—"}</TdMono>
+                  <tr key={r.id}><Td>{r.date}</Td><TdMono>{fmtTime(r.time_in)}</TdMono><TdMono>{fmtTimeOut(r)}</TdMono>
                   <Td>{r.total_minutes != null ? fmtDuration(r.total_minutes) : "—"}</Td><Td><StatusBadge a={r} shiftHours={shiftHours} /></Td></tr>
                 ))}
               </TableScroll>
